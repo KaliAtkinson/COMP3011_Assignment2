@@ -201,4 +201,36 @@ class CommandLineControllerTest {
         capture(() -> holder[0] = new CommandLineController(new String[] { "-nq", video }));
         assertEquals("Unknown option: -q", holder[0].getErrorMessage());
     }
+
+    @Test
+    void helpTextMatchesSpecification() {
+        String out = capture(() -> new CommandLineController(new String[] { "--help" }));
+        String expected = """
+                Usage: VideoPlayer [options] [video-file]
+
+                Options:
+                  -h, --help         Show this help message
+                  -a, --audio        Play audio
+                  -x, --maximise     Open the player maximised
+                  -1, --monitor-1    Open the player on display 1
+                  -2, --monitor-2    Open the player on display 2
+
+                Frame processors:
+                  -n, --number-frames    Render the frame number onto each frame
+                  -s, --scratch-frames   Render vertical film scratches
+                  -f, --flicker-frames   Randomly dim frames
+                  -w, --black-and-white  Convert frames to black and white
+                  -y, --yellow-frames    Apply a warmer colour temperature
+                  -v, --vignette-frames  Darken the frame edges
+                  -d, --dust-frames      Render dust and hair marks
+                  -j, --jitter-frames    Randomly displace frames by a few pixels
+                  -m, --mottle-frames    Add cloudy emulsion mottling
+                  -b, --bleed-frames     Bleed light into frames
+                  -p, --pepper-frames    Pepper frames with dark spots/blotches
+                Frame processors are applied in command-line order and may be repeated.
+                Example: -nssnfwyvdjmbp numbers, scratches twice, numbers again, flickers,
+                converts, warms, vignettes, dusts, jitters, mottles, bleeds, then peppers.
+                """;
+        assertEquals(expected, out);
+    }
 }
