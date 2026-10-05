@@ -11,6 +11,7 @@ import java.io.IOException;
 import java.io.PrintStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -37,6 +38,12 @@ class CommandLineControllerTest {
             System.setOut(original);
         }
         return buffer.toString().replace("\r\n", "\n");
+    }
+
+    private static String shorts(CommandLineController controller) {
+        StringBuilder sb = new StringBuilder();
+        controller.getRequestedProcessors().forEach(o -> sb.append(o.shortName()));
+        return sb.toString();
     }
 
     @Test
@@ -125,5 +132,73 @@ class CommandLineControllerTest {
         capture(() -> holder[0] = new CommandLineController(new String[] { "-h" }));
         assertNull(holder[0].getErrorMessage());
         assertFalse(holder[0].shouldLaunchApplication());
+    }
+
+    @Test
+    void noProcessorsByDefault() {
+        CommandLineController c = new CommandLineController(new String[] { video });
+        assertTrue(c.getRequestedProcessors().isEmpty());
+        assertTrue(c.createFrameProcessors().isEmpty());
+    }
+
+    @Test
+    void longOptionsKeepCommandLineOrderIncludingRepeats() {
+        CommandLineController c = new CommandLineController(new String[] {
+                "--jitter-frames", "--flicker-frames", "--dust-frames", "--dust-frames", "--number-frames", video });
+        assertEquals("jfddn", shorts(c));
+    }
+
+    @Test
+    void stackedShortProcessorOptions() {
+        assertEquals("jfddn", shorts(new CommandLineController(new String[] { "-jfddn", video })));
+    }
+
+    @Test
+    void separateShortProcessorOptions() {
+        assertEquals("jfddn", shorts(new CommandLineController(new String[] { "-j", "-f", "-d", "-d", "-n", video })));
+    }
+
+    @Test
+    void mixedLongShortAndStacked() {
+        assertEquals("jfddn", shorts(new CommandLineController(
+                new String[] { "-jf", "--dust-frames", "-d", "--number-frames", video })));
+    }
+
+    @Test
+    void processorsMayBeStackedWithBuiltInFlags() {
+        CommandLineController c = new CommandLineController(new String[] { "-ax1w", video });
+        assertTrue(c.isAudioRequested());
+        assertEquals(1, c.getDisplayId());
+        assertEquals("w", shorts(c));
+    }
+
+    @Test
+    void videoFileMayComeBeforeProcessorOptions() {
+        assertEquals("nsb", shorts(new CommandLineController(new String[] { video, "-ns", "-b" })));
+    }
+
+    @Test
+    void everyProcessorLetterInHelpExampleIsAccepted() {
+        CommandLineController c = new CommandLineController(new String[] { "-nssnfwyvdjmbp", video });
+        assertEquals("nssnfwyvdjmbp", shorts(c));
+        assertEquals(13, c.createFrameProcessors().size());
+    }
+
+    @Test
+    void createdProcessorsMatchRequestedTypesAndRepeatsAreSeparateInstances() {
+        CommandLineController c = new CommandLineController(new String[] { "-wyw", video });
+        List<FrameProcessor> processors = c.createFrameProcessors();
+        assertEquals(3, processors.size());
+        assertTrue(processors.get(0) instanceof FrameBlackAndWhiter);
+        assertTrue(processors.get(1) instanceof FrameYellower);
+        assertTrue(processors.get(2) instanceof FrameBlackAndWhiter);
+        assertTrue(processors.get(0) != processors.get(2), "repeats must be separate instances");
+    }
+
+    @Test
+    void unknownProcessorOptionInStackIsAnError() {
+        CommandLineController[] holder = new CommandLineController[1];
+        capture(() -> holder[0] = new CommandLineController(new String[] { "-nq", video }));
+        assertEquals("Unknown option: -q", holder[0].getErrorMessage());
     }
 }

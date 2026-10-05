@@ -13,6 +13,7 @@ package comp3011;
 import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 
 /**
  * Created in the VideoPlayerApp's main function to receive and parse the video player's command-line arguments.
@@ -32,6 +33,7 @@ public class CommandLineController {
     private Integer displayId;
     private File videoFile;
     private String errorMessage;
+    private final List<FrameProcessorOption> requestedProcessors = new ArrayList<>(); // In command-line order.
 
     public CommandLineController(String[] args) {
         this.args = args.clone();
@@ -66,6 +68,23 @@ public class CommandLineController {
 
     public boolean isMaximiseRequested() {
         return maximiseRequested;
+    }
+
+    /**
+     * Creates the requested frame processors, in command-line order, repeats included. Each call builds brand new
+     * processor instances. Processors number themselves by construction order (which seeds their pseudo-randomness),
+     * so they must be created once, here, in order - never cloned or re-ordered afterwards.
+     */
+    public List<FrameProcessor> createFrameProcessors() {
+        List<FrameProcessor> processors = new ArrayList<>();
+        for (FrameProcessorOption option : requestedProcessors) {
+            processors.add(option.create());
+        }
+        return processors;
+    }
+
+    public List<FrameProcessorOption> getRequestedProcessors() {
+        return List.copyOf(requestedProcessors);
     }
 
     public boolean shouldLaunchApplication() {
@@ -109,7 +128,14 @@ public class CommandLineController {
             case "--maximise" -> maximiseRequested = true;
             case "--monitor-1" -> setDisplayId(1);
             case "--monitor-2" -> setDisplayId(2);
-            default -> setError("Unknown option: " + arg);
+            default -> {
+                Optional<FrameProcessorOption> processor = FrameProcessorCatalogue.findByLongOption(arg);
+                if (processor.isPresent()) {
+                    requestedProcessors.add(processor.get());
+                } else {
+                    setError("Unknown option: " + arg);
+                }
+            }
         }
     }
 
@@ -120,7 +146,14 @@ public class CommandLineController {
             case 'x' -> maximiseRequested = true;
             case '1' -> setDisplayId(1);
             case '2' -> setDisplayId(2);
-            default -> setError("Unknown option: -" + shortName);
+            default -> {
+                Optional<FrameProcessorOption> processor = FrameProcessorCatalogue.findByShortName(shortName);
+                if (processor.isPresent()) {
+                    requestedProcessors.add(processor.get());
+                } else {
+                    setError("Unknown option: -" + shortName);
+                }
+            }
         }
     }
 
