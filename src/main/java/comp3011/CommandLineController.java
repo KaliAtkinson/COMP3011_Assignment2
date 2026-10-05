@@ -4,7 +4,7 @@
  * 
  * Authors:
  *   1. Simon Ratcliffe, in collaboration with GPT-5.6 Terra
- *   2. <student name and student number insert here upon modification>
+ *   2. Kali Atkinson 2948529
  *
  * Copyright 2026 Simon Ratcliffe
  */
@@ -75,41 +75,65 @@ public class CommandLineController {
     private void parse() {
         List<String> videoFiles = new ArrayList<>();
         for (String arg : args) {
-            if ("-h".equals(arg) || "--help".equals(arg)) {
-                helpRequested = true;
-            } else if ("-a".equals(arg) || "--audio".equals(arg)) {
-                audioRequested = true;
-            } else if ("-x".equals(arg) || "--maximise".equals(arg)) {
-                maximiseRequested = true;
-            } else if ("-1".equals(arg) || "--monitor-1".equals(arg)) {
-                setDisplayId(1);
-            } else if ("-2".equals(arg) || "--monitor-2".equals(arg)) {
-                setDisplayId(2);
-            } else if (arg.startsWith("-")) {
-                errorMessage = "Unknown option: " + arg;
+            if (arg.startsWith("--")) {
+                parseLongOption(arg);
+            } else if (arg.startsWith("-") && arg.length() > 1) {
+                // Short options may be stacked, e.g. -ax1, and are applied left to right.
+                for (char shortName : arg.substring(1).toCharArray()) {
+                    parseShortOption(shortName);
+                }
             } else {
                 videoFiles.add(arg);
             }
         }
 
         if (videoFiles.size() > 1) {
-            errorMessage = "Usage: VideoPlayer [options] [video-file]";
+            setError("Usage: VideoPlayer [options] [video-file]");
         } else if (videoFiles.size() == 1) {
             videoFile = new File(videoFiles.get(0));
             if (!videoFile.isFile()) {
-                errorMessage = "File not found: " + videoFile.getPath();
+                setError("File not found: " + videoFile.getPath());
                 videoFile = null;
             }
         } else {
             if (!helpRequested) {
-                errorMessage = "No video file specified.";
+                setError("No video file specified.");
             }
+        }
+    }
+
+    private void parseLongOption(String arg) {
+        switch (arg) {
+            case "--help" -> helpRequested = true;
+            case "--audio" -> audioRequested = true;
+            case "--maximise" -> maximiseRequested = true;
+            case "--monitor-1" -> setDisplayId(1);
+            case "--monitor-2" -> setDisplayId(2);
+            default -> setError("Unknown option: " + arg);
+        }
+    }
+
+    private void parseShortOption(char shortName) {
+        switch (shortName) {
+            case 'h' -> helpRequested = true;
+            case 'a' -> audioRequested = true;
+            case 'x' -> maximiseRequested = true;
+            case '1' -> setDisplayId(1);
+            case '2' -> setDisplayId(2);
+            default -> setError("Unknown option: -" + shortName);
+        }
+    }
+
+    // Keep the first error reported; later ones are usually just consequences of it.
+    private void setError(String message) {
+        if (errorMessage == null) {
+            errorMessage = message;
         }
     }
 
     private void setDisplayId(int displayId) {
         if (this.displayId != null && this.displayId != displayId) {
-            errorMessage = "Only one display option can be used";
+            setError("Only one display option can be used");
             return;
         }
         this.displayId = displayId;
