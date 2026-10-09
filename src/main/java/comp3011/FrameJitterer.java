@@ -4,7 +4,7 @@
  * 
  * Authors:
  *   1. Simon Ratcliffe, in collaboration with GPT-5.6 Terra
- *   2. <student name and student number insert here upon modification>
+ *   2. Kali Atkinson 2948529
  *
  * Copyright 2026 Simon Ratcliffe
  */
@@ -33,8 +33,11 @@ public class FrameJitterer extends FrameProcessor {
 
     private final int instanceIndex;
     private int mediaSeed;
-    private byte[] sourcePixels;
-    private byte[] blackRow;
+    private byte[] blackRow; // All zeroes and never written after initialise(), so safe to share between threads.
+
+    // Scratch copy of the frame being jittered. process() can be called from several threads at once, so each thread
+    // gets its own buffer: a single shared buffer would let one thread overwrite another's copy mid-frame.
+    private final ThreadLocal<byte[]> sourcePixels = new ThreadLocal<>();
 
     public FrameJitterer() {
         super();
@@ -46,9 +49,7 @@ public class FrameJitterer extends FrameProcessor {
         super.initialise(videoInfo);
         mediaSeed = saltedMediaSeed(videoInfo.mediaName(), instanceIndex + SEED_SALT);
 
-        int frameBytes = videoInfo.imageStride() * videoInfo.imageHeight();
         int widthBytes = videoInfo.imageWidth() * videoInfo.imageChannels();
-        sourcePixels = new byte[frameBytes];
         blackRow = new byte[widthBytes];
     }
 
@@ -130,6 +131,7 @@ public class FrameJitterer extends FrameProcessor {
         int frameBytes = stride * height;
         int widthBytes = width * channels;
 
+        byte[] sourcePixels = sourcePixelsForThisThread(frameBytes);
         ByteBuffer source = pixels.duplicate();
         source.clear();
         source.get(sourcePixels, 0, frameBytes);
@@ -162,5 +164,16 @@ public class FrameJitterer extends FrameProcessor {
             destination.position(destinationIndex);
             destination.put(sourcePixels, sourceIndex, rowBytesToCopy);
         }
+    }
+
+    // Returns this thread's scratch buffer, (re)allocating it if it is missing or too small, for example because a
+    // video with a larger frame size has been opened since the buffer was created.
+    private byte[] sourcePixelsForThisThread(int frameBytes) {
+        byte[] buffer = sourcePixels.get();
+        if (buffer == null || buffer.length < frameBytes) {
+            buffer = new byte[frameBytes];
+            sourcePixels.set(buffer);
+        }
+        return buffer;
     }
 }
