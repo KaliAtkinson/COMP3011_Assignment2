@@ -82,10 +82,7 @@ public class VideoPlayerModel {
     private double frameRate;
     private int intFrameRate;
     private int totalVideoFrames;
-    private long firstTimestampUs = NO_SEEK_REQUEST;
-    private long logicalPlaybackBaseUs;
-    private long playbackStartNs;
-    private long pauseStartedNs;
+    private final PlaybackClock clock = new PlaybackClock(); // Maps media timestamps to System.nanoTime() moments.
     private long relativeSeekBaseUs = NO_SEEK_REQUEST;
 
     public VideoPlayerModel(
@@ -140,7 +137,7 @@ public class VideoPlayerModel {
         relativeSeekBaseUs = NO_SEEK_REQUEST;
 
         if (pauseRequested) {
-            pauseStartedNs = System.nanoTime();
+            clock.pause(System.nanoTime());
             flushAudioOutput();
         } else {
             resumePlaybackClock(System.nanoTime());
@@ -264,17 +261,11 @@ public class VideoPlayerModel {
         preparedFrame = null;
         currentTimestampUs = logicalTimestampUs;
         relativeSeekBaseUs = logicalTimestampUs;
-        firstTimestampUs = NO_SEEK_REQUEST;
-        logicalPlaybackBaseUs = logicalTimestampUs;
-        playbackStartNs = 0;
-        pauseStartedNs = pauseRequested ? System.nanoTime() : 0;
+        clock.reset(logicalTimestampUs, pauseRequested, System.nanoTime());
     }
 
     private void resumePlaybackClock(long now) {
-        if (pauseStartedNs > 0 && playbackStartNs > 0) {
-            playbackStartNs += now - pauseStartedNs;
-        }
-        pauseStartedNs = 0;
+        clock.resume(now);
     }
 
     private void prepareNextFrame() {
@@ -322,12 +313,8 @@ public class VideoPlayerModel {
                 frameProcessorsInitialised = true;
             }
 
-            if (firstTimestampUs == NO_SEEK_REQUEST) {
-                firstTimestampUs = timestampUs;
-                playbackStartNs = System.nanoTime();
-                if (pauseRequested) {
-                    pauseStartedNs = playbackStartNs;
-                }
+            if (!clock.isAnchored()) {
+                clock.anchor(timestampUs, pauseRequested, System.nanoTime());
             }
 
             int frameNumber = grabber.getFrameNumber();
@@ -335,16 +322,13 @@ public class VideoPlayerModel {
             processFrame(frame, info);
 
             Image image = converter.convert(frame);
-            long relativeTimestampUs = Math.max(0, timestampUs - firstTimestampUs);
-            long logicalTimestampUs = logicalPlaybackBaseUs + relativeTimestampUs;
-            long targetTimeNs = playbackStartNs + relativeTimestampUs * 1_000L;
 
             return new PreparedFrame(
                     image,
                     frameNumber,
                     timestampUs,
-                    logicalTimestampUs,
-                    targetTimeNs,
+                    clock.logicalTimestampUs(timestampUs),
+                    clock.targetTimeNs(timestampUs),
                     System.nanoTime());
         }
 
@@ -428,12 +412,12 @@ public class VideoPlayerModel {
             pendingAudio.clear();
             return;
         }
-        if (pauseRequested || firstTimestampUs == NO_SEEK_REQUEST || playbackStartNs <= 0) {
+        if (pauseRequested || !clock.isRunning()) {
             return;
         }
 
         // Here is the real time dependent logic
-        long dueTimestampUs = firstTimestampUs + (now + AUDIO_LEAD_NS - playbackStartNs) / 1_000L;
+        long dueTimestampUs = clock.dueMediaTimestampUs(now, AUDIO_LEAD_NS);
         while (!pendingAudio.isEmpty()) {
             PendingAudio audio = pendingAudio.peek();
             if (audio.timestampUs() > dueTimestampUs) {
@@ -479,9 +463,7 @@ public class VideoPlayerModel {
         playbackOpen = false;
         preparedFrame = null;
         pendingAudio.clear();
-        firstTimestampUs = NO_SEEK_REQUEST;
-        playbackStartNs = 0;
-        pauseStartedNs = 0;
+        clock.stop();
         audioAvailable = false;
         frameProcessorsInitialised = false;
 
