@@ -75,7 +75,7 @@ public class VideoPlayerModel {
     private boolean pauseRequested;
     private boolean audioOutputEnabled;
     private boolean audioAvailable;
-    private boolean frameProcessorsInitialised;
+    private EffectChain effectChain; // Applies the effects for the current playback session.
     private long currentTimestampUs;
     private long videoDurationUs = NO_SEEK_REQUEST;
     private int videoFrameDurationUs;
@@ -251,6 +251,14 @@ public class VideoPlayerModel {
             audioPlayer.open(grabber.getSampleRate(), grabber.getAudioChannels());
         }
 
+        effectChain = new EffectChain(frameProcessors, new EffectChain.MediaProperties(
+                mediaName(videoFile),
+                totalVideoFrames,
+                frameRate,
+                intFrameRate,
+                videoFrameDurationUs,
+                grabber.getPixelFormat()));
+
         if (startTimestampUs > 0) {
             grabber.setTimestamp(startTimestampUs);
         }
@@ -297,29 +305,13 @@ public class VideoPlayerModel {
                 continue;
             }
 
-            if (!frameProcessorsInitialised) {
-                initialiseFrameProcessors(new InfoVideo(
-                        mediaName(videoFile),
-                        totalVideoFrames,
-                        frame.imageWidth,
-                        frame.imageHeight,
-                        frame.imageDepth,
-                        frame.imageChannels,
-                        frame.imageStride,
-                        frameRate,
-                        intFrameRate,
-                        videoFrameDurationUs,
-                        grabber.getPixelFormat()));
-                frameProcessorsInitialised = true;
-            }
-
             if (!clock.isAnchored()) {
                 clock.anchor(timestampUs, pauseRequested, System.nanoTime());
             }
 
             int frameNumber = grabber.getFrameNumber();
             InfoFrame info = new InfoFrame(frameNumber, timestampUs);
-            processFrame(frame, info);
+            effectChain.apply(frame, info);
 
             Image image = converter.convert(frame);
 
@@ -465,7 +457,7 @@ public class VideoPlayerModel {
         pendingAudio.clear();
         clock.stop();
         audioAvailable = false;
-        frameProcessorsInitialised = false;
+        effectChain = null;
 
         if (audioPlayer != null) {
             audioPlayer.close();
@@ -522,18 +514,6 @@ public class VideoPlayerModel {
         }
 
         return Math.max(0, durationUs - frameDurationUs);
-    }
-
-    private void processFrame(Frame frame, InfoFrame info) throws Exception {
-        for (FrameProcessor processor : frameProcessors) {
-            processor.process(frame, info);
-        }
-    }
-
-    private void initialiseFrameProcessors(InfoVideo videoInfo) throws Exception {
-        for (FrameProcessor processor : frameProcessors) {
-            processor.initialise(videoInfo);
-        }
     }
 
     private Frame grabFrame() throws Exception {
