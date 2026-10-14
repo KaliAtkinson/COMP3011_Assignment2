@@ -43,7 +43,7 @@ import org.bytedeco.javacv.Frame;
  *
  * <p>
  * <b>Frame ownership.</b> The source is allowed to reuse one {@link Frame} object for every grab. Each video frame is
- * therefore copied straight away, and it is the copy that is prepared and queued.
+ * therefore copied straight away, and it is the copy that has the effects applied and is queued.
  * </p>
  */
 final class FrameDecoder {
@@ -54,7 +54,7 @@ final class FrameDecoder {
     }
 
     private final MediaSource source; // Used by the decoder thread only once started.
-    private final FrameEffectsStage preparer;
+    private final FrameEffectsStage effects;
     private final Function<Frame, byte[]> audioSampler; // Null when there is no audio to extract.
     private final BlockingQueue<DecodedItem> output;
     private final BlockingQueue<SeekRequest> seekRequests = new LinkedBlockingQueue<>();
@@ -64,13 +64,13 @@ final class FrameDecoder {
 
     /**
      * @param source       where frames come from; the decoder takes ownership and closes it when it stops
-     * @param preparer     applied to each video frame on the decoder thread
+     * @param effects      applied to each video frame on the decoder thread
      * @param audioSampler turns an audio frame into bytes for the sound card, or null if audio is not wanted
      * @param capacity     how many decoded items may wait in the output queue before the decoder blocks
      */
-    FrameDecoder(MediaSource source, FrameEffectsStage preparer, Function<Frame, byte[]> audioSampler, int capacity) {
+    FrameDecoder(MediaSource source, FrameEffectsStage effects, Function<Frame, byte[]> audioSampler, int capacity) {
         this.source = source;
-        this.preparer = preparer;
+        this.effects = effects;
         this.audioSampler = audioSampler;
         this.output = new ArrayBlockingQueue<>(capacity);
         thread.setDaemon(true); // A forgotten decoder must never keep the application alive.
@@ -176,7 +176,7 @@ final class FrameDecoder {
 
         int frameNumber = source.frameNumber();
         Frame frame = grabbed.clone(); // The source may overwrite 'grabbed' on its next grab, so work on a copy.
-        preparer.prepare(frame, new InfoFrame(frameNumber, timestampUs));
+        effects.apply(frame, new InfoFrame(frameNumber, timestampUs));
         publish(new DecodedItem.Video(generation, frameNumber, timestampUs, frame, System.nanoTime()));
         return true;
     }

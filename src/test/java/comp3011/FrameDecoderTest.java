@@ -120,12 +120,12 @@ class FrameDecoderTest {
         }
     }
 
-    private static final FramePreparer DO_NOTHING = (frame, info) -> {
+    private static final FrameEffectsStage NO_EFFECTS = (frame, info) -> {
     };
 
     private FakeMediaSource startDecoder(int totalFrames, int capacity) {
         FakeMediaSource source = new FakeMediaSource(totalFrames, false);
-        decoder = new FrameDecoder(source, DO_NOTHING, null, capacity);
+        decoder = new FrameDecoder(source, NO_EFFECTS, null, capacity);
         decoder.start();
         return source;
     }
@@ -191,25 +191,25 @@ class FrameDecoderTest {
     }
 
     @Test
-    void preparerRunsOncePerFrameOnTheDecoderThreadNotTheCallersThread() throws Exception {
+    void effectsRunOncePerFrameOnTheDecoderThreadNotTheCallersThread() throws Exception {
         FakeMediaSource source = new FakeMediaSource(10, false);
         Set<String> threads = ConcurrentHashMap.newKeySet();
-        AtomicInteger prepared = new AtomicInteger();
+        AtomicInteger applied = new AtomicInteger();
         decoder = new FrameDecoder(source, (frame, info) -> {
             threads.add(Thread.currentThread().getName());
-            prepared.incrementAndGet();
+            applied.incrementAndGet();
         }, null, 64);
         decoder.start();
 
         collectUntilTerminal(0);
 
-        assertEquals(10, prepared.get());
+        assertEquals(10, applied.get());
         assertEquals(Set.of("frame-decoder"), threads);
         assertNotEquals(Thread.currentThread().getName(), "frame-decoder");
     }
 
     @Test
-    void preparedChangesAreVisibleInTheQueuedFrame() throws Exception {
+    void changesMadeByTheEffectsAreVisibleInTheQueuedFrame() throws Exception {
         FakeMediaSource source = new FakeMediaSource(3, false);
         decoder = new FrameDecoder(source, (frame, info) -> {
             ((ByteBuffer) frame.image[0]).put(0, (byte) 99);
@@ -297,7 +297,7 @@ class FrameDecoderTest {
     void aDecodeFailureIsReportedAndTheDecoderStaysIdle() throws Exception {
         FakeMediaSource source = new FakeMediaSource(100, false);
         source.failAtPosition = 3;
-        decoder = new FrameDecoder(source, DO_NOTHING, null, 64);
+        decoder = new FrameDecoder(source, NO_EFFECTS, null, 64);
         decoder.start();
 
         List<DecodedItem> items = collectUntilTerminal(0);
@@ -310,7 +310,7 @@ class FrameDecoderTest {
     }
 
     @Test
-    void aFailureInThePreparerIsReportedAsAFailure() throws Exception {
+    void aFailureInTheEffectsIsReportedAsAFailure() throws Exception {
         FakeMediaSource source = new FakeMediaSource(10, false);
         decoder = new FrameDecoder(source, (frame, info) -> {
             if (info.frameNumber() == 2) {
@@ -328,7 +328,7 @@ class FrameDecoderTest {
     @Test
     void audioChunksAreDeliveredWhenASamplerIsGiven() throws Exception {
         FakeMediaSource source = new FakeMediaSource(3, true);
-        decoder = new FrameDecoder(source, DO_NOTHING, frame -> new byte[] { 7, 7 }, 64);
+        decoder = new FrameDecoder(source, NO_EFFECTS, frame -> new byte[] { 7, 7 }, 64);
         decoder.start();
 
         List<DecodedItem> items = collectUntilTerminal(0);
@@ -345,7 +345,7 @@ class FrameDecoderTest {
     @Test
     void noAudioIsDeliveredWithoutASampler() throws Exception {
         FakeMediaSource source = new FakeMediaSource(3, true);
-        decoder = new FrameDecoder(source, DO_NOTHING, null, 64);
+        decoder = new FrameDecoder(source, NO_EFFECTS, null, 64);
         decoder.start();
 
         List<DecodedItem> items = collectUntilTerminal(0);
