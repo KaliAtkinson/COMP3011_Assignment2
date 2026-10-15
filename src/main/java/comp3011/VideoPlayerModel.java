@@ -305,23 +305,13 @@ public class VideoPlayerModel {
                 continue;
             }
 
-            if (!clock.isAnchored()) {
-                clock.anchor(timestampUs, pauseRequested, System.nanoTime());
-            }
-
             int frameNumber = grabber.getFrameNumber();
             InfoFrame info = new InfoFrame(frameNumber, timestampUs);
             effectChain.apply(frame, info);
 
             Image image = converter.convert(frame);
 
-            return new PreparedFrame(
-                    image,
-                    frameNumber,
-                    timestampUs,
-                    clock.logicalTimestampUs(timestampUs),
-                    clock.targetTimeNs(timestampUs),
-                    System.nanoTime());
+            return new PreparedFrame(image, frameNumber, timestampUs, System.nanoTime());
         }
 
         return null;
@@ -342,7 +332,7 @@ public class VideoPlayerModel {
         writeDueAudio(now);
 
         // Task (2)
-        if (preparedFrame != null && preparedFrame.targetTimeNs() <= now) {
+        if (preparedFrame != null && isDue(preparedFrame, now)) {
             // We have a prepared frame ready to go and it is due (or just past due!) so get it up on screen ASAP!
             displayPreparedFrame(now);
         }
@@ -364,15 +354,29 @@ public class VideoPlayerModel {
         }
     }
 
+    // The first frame after the clock has been reset is due the moment we are ready to show it, because it is the frame
+    // that starts the clock. Every later frame is due according to the clock.
+    private boolean isDue(PreparedFrame frame, long now) {
+        return !clock.isAnchored() || clock.targetTimeNs(frame.mediaTimestampUs()) <= now;
+    }
+
     private void displayPreparedFrame(long now) {
         PreparedFrame frame = preparedFrame;
         preparedFrame = null;
-        currentTimestampUs = frame.logicalTimestampUs();
+
+        // The clock starts ticking when the first frame is shown, not when it was decoded, so the time it took to decode
+        // and process that frame cannot make the frame (and every one after it) late before it has even appeared.
+        if (!clock.isAnchored()) {
+            clock.anchor(frame.mediaTimestampUs(), pauseRequested, now);
+        }
+        long targetTimeNs = clock.targetTimeNs(frame.mediaTimestampUs());
+
+        currentTimestampUs = clock.logicalTimestampUs(frame.mediaTimestampUs());
         relativeSeekBaseUs = NO_SEEK_REQUEST;
 
         // Dump some logging to the console once per second so that real time performance can be monitored.
         if (intFrameRate > 0 && frame.frameNumber() % intFrameRate == 0) {
-            long remainingUs = (frame.targetTimeNs() - frame.preparedAtNs()) / 1_000L;
+            long remainingUs = (targetTimeNs - frame.preparedAtNs()) / 1_000L;
             if (remainingUs < 0) {
                 System.out.printf("Frame headroom is \u001B[31m%5dus\u001B[0m out of %dus spare.%n",
                         remainingUs,
@@ -553,8 +557,6 @@ public class VideoPlayerModel {
             Image image,
             int frameNumber,
             long mediaTimestampUs,
-            long logicalTimestampUs,
-            long targetTimeNs,
             long preparedAtNs) {
     }
 
