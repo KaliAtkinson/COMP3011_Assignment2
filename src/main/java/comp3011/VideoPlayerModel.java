@@ -367,7 +367,7 @@ public class VideoPlayerModel {
             switch (item) {
                 case DecodedItem.Video video -> readyFrames.add(video);
                 case DecodedItem.Audio audio -> queueAudio(audio);
-                case DecodedItem.EndOfStream end -> endOfStreamReached = true;
+                case DecodedItem.EndOfStream _ -> endOfStreamReached = true;
                 case DecodedItem.Failure failure -> pendingFailure = failure.cause();
             }
         }
