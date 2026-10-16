@@ -186,6 +186,7 @@ public class CommandLineController {
         for (FrameProcessorOption option : FrameProcessorCatalogue.options()) {
             System.out.printf("  -%c, %-19s%s%n", option.shortName(), option.longOption(), option.description());
         }
+        System.out.println();
         System.out.println("Frame processors are applied in command-line order and may be repeated.");
         System.out.println("Example: -nssnfwyvdjmbp numbers, scratches twice, numbers again, flickers,");
         System.out.println("converts, warms, vignettes, dusts, jitters, mottles, bleeds, then peppers.");
