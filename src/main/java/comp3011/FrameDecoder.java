@@ -87,8 +87,11 @@ final class FrameDecoder {
      */
     int seek(long timestampUs) {
         int generation = latestGeneration.incrementAndGet();
+        // Empty the queue BEFORE the request is visible. The decoder cannot start on the new position until it sees the
+        // request, so nothing for the new position can be in the queue yet to be thrown away by mistake. Stale items
+        // that slip in after this are harmless, because the consumer filters them out by generation.
+        output.clear();
         seekRequests.add(new SeekRequest(generation, timestampUs));
-        output.clear(); // Free the queue now; anything stale that slips in afterwards is filtered by generation.
         return generation;
     }
 

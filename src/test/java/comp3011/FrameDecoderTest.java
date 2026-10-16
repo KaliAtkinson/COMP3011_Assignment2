@@ -264,6 +264,20 @@ class FrameDecoderTest {
     }
 
     @Test
+    void theFirstFrameAfterASeekIsNeverLostWhateverTheTimingOfTheDecoder() throws Exception {
+        // Regression test. Discarding the queue after sending the request let the decoder queue a frame for the new
+        // position in between, which the discard then threw away. The window is tiny (it showed up about once in every
+        // few hundred seeks), so this tries a great many. A failure is always real, but a pass is not a proof.
+        startDecoder(100_000, 4);
+
+        for (int i = 1; i <= 1_500; i++) {
+            long target = 50L * i; // Always inside the 100,000 frames available.
+            int generation = decoder.seek(target * FRAME_US);
+            assertEquals(target, nextVideo(generation).frameNumber(), "seek " + i + " lost its first frame");
+        }
+    }
+
+    @Test
     void aSeekIsNoticedEvenWhileTheDecoderIsBlockedOnAFullQueue() throws Exception {
         FakeMediaSource source = startDecoder(1_000, 2);
         Thread.sleep(200); // Decoder is now stalled with a full queue.
