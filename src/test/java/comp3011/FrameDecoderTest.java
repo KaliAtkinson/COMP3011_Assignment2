@@ -56,6 +56,7 @@ class FrameDecoderTest {
         final AtomicInteger closeCount = new AtomicInteger();
         final boolean withAudio;
         volatile int failAtPosition = -1;
+        volatile boolean failWithError;
         private int position; // Index of the next frame to grab.
         private int lastFrameNumber;
         private long lastTimestampUs;
@@ -73,6 +74,9 @@ class FrameDecoderTest {
         public Frame grab() throws Exception {
             grabCount.incrementAndGet();
             if (position == failAtPosition) {
+                if (failWithError) {
+                    throw new OutOfMemoryError("simulated memory exhaustion");
+                }
                 throw new IllegalStateException("simulated decode failure");
             }
             if (position >= totalFrames) {
@@ -319,6 +323,23 @@ class FrameDecoderTest {
         assertEquals(4, items.size()); // Frames 0, 1, 2 and then the failure.
         DecodedItem.Failure failure = assertInstanceOf(DecodedItem.Failure.class, items.get(3));
         assertEquals("simulated decode failure", failure.cause().getMessage());
+        Thread.sleep(100);
+        assertNull(decoder.poll());
+    }
+
+    @Test
+    void anErrorThatWouldEndTheDecoderThreadIsReportedAsAFailureInstead() throws Exception {
+        FakeMediaSource source = new FakeMediaSource(100, false);
+        source.failAtPosition = 3;
+        source.failWithError = true;
+        decoder = new FrameDecoder(source, NO_EFFECTS, null, 64);
+        decoder.start();
+
+        List<DecodedItem> items = collectUntilTerminal(0);
+
+        assertEquals(4, items.size()); // Frames 0, 1, 2 and then the failure.
+        DecodedItem.Failure failure = assertInstanceOf(DecodedItem.Failure.class, items.get(3));
+        assertTrue(failure.cause().getMessage().contains("simulated memory exhaustion"), failure.cause().getMessage());
         Thread.sleep(100);
         assertNull(decoder.poll());
     }
