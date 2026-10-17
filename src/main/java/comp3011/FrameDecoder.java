@@ -160,8 +160,13 @@ final class FrameDecoder {
                     }
                 } catch (InterruptedException e) {
                     throw e;
-                } catch (Exception e) {
-                    publish(new DecodedItem.Failure(generation, e));
+                } catch (Exception | Error e) {
+                    // Errors such as running out of memory are reported too. If they were left to end the thread, the
+                    // consumer would simply wait for frames that never come, with nothing to say what went wrong.
+                    Exception cause = e instanceof Exception exception
+                            ? exception
+                            : new IllegalStateException("Decoding was stopped by " + e, e);
+                    publish(new DecodedItem.Failure(generation, cause));
                     idle = true;
                 }
             }
