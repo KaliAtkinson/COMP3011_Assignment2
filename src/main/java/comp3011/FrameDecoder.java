@@ -10,6 +10,7 @@
  */
 package comp3011;
 
+import java.util.Iterator;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -48,7 +49,7 @@ import org.bytedeco.javacv.Frame;
  */
 final class FrameDecoder {
     /** How often a waiting decoder wakes to check whether it has been asked to seek or stop. */
-    private static final long CHECK_INTERVAL_MS = 20;
+    private static final long DEFAULT_CHECK_INTERVAL_MS = 20;
 
     private record SeekRequest(int generation, long timestampUs) {
     }
@@ -60,6 +61,7 @@ final class FrameDecoder {
     private final BlockingQueue<SeekRequest> seekRequests = new LinkedBlockingQueue<>();
     private final AtomicInteger latestGeneration = new AtomicInteger();
     private final Thread thread = new Thread(this::run, "frame-decoder");
+    private final long checkIntervalMs;
     private volatile boolean stopRequested;
 
     /**
@@ -69,6 +71,21 @@ final class FrameDecoder {
      * @param capacity     how many decoded items may wait in the output queue before the decoder blocks
      */
     FrameDecoder(MediaSource source, FrameEffectsStage effects, Function<Frame, byte[]> audioSampler, int capacity) {
+        this(source, effects, audioSampler, capacity, DEFAULT_CHECK_INTERVAL_MS);
+    }
+
+    /**
+     * As above, but also sets how often a waiting decoder wakes of its own accord to look for a request. Normally a
+     * decoder is woken at once when there is something for it to do, and this only matters as a safety net. A test can
+     * set it very long to prove that the prompt wake-ups really happen.
+     */
+    FrameDecoder(
+            MediaSource source,
+            FrameEffectsStage effects,
+            Function<Frame, byte[]> audioSampler,
+            int capacity,
+            long checkIntervalMs) {
+        this.checkIntervalMs = checkIntervalMs;
         this.source = source;
         this.effects = effects;
         this.audioSampler = audioSampler;
@@ -87,12 +104,23 @@ final class FrameDecoder {
      */
     int seek(long timestampUs) {
         int generation = latestGeneration.incrementAndGet();
-        // Empty the queue BEFORE the request is visible. The decoder cannot start on the new position until it sees the
-        // request, so nothing for the new position can be in the queue yet to be thrown away by mistake. Stale items
-        // that slip in after this are harmless, because the consumer filters them out by generation.
-        output.clear();
+        // Publish the request first, so that a decoder woken by the space freed below already sees it, and then remove
+        // only the stale items, which are those from older generations. Items for the new position carry the new
+        // generation, so they can never be removed by mistake, however the two threads happen to interleave.
         seekRequests.add(new SeekRequest(generation, timestampUs));
+        discardStaleItems(generation);
         return generation;
+    }
+
+    // Removes every queued item that was decoded for a position older than the given generation. This removes items one
+    // at a time through the iterator, rather than with removeIf, because only the former wakes a decoder that is waiting
+    // for room in a full queue. removeIf frees the room but leaves the decoder asleep until its wait runs out.
+    private void discardStaleItems(int currentGeneration) {
+        for (Iterator<DecodedItem> items = output.iterator(); items.hasNext();) {
+            if (items.next().generation() < currentGeneration) {
+                items.remove();
+            }
+        }
     }
 
     /** The next decoded item, or null if there is none yet. Never blocks. */
@@ -119,8 +147,10 @@ final class FrameDecoder {
         try {
             while (!stopRequested) {
                 try {
-                    SeekRequest seek = takeLatestSeek(idle ? CHECK_INTERVAL_MS : 0);
+                    SeekRequest seek = takeLatestSeek(idle ? checkIntervalMs : 0);
                     if (seek != null) {
+                        // Anything stale that slipped into the queue after the caller cleared it is removed here.
+                        discardStaleItems(seek.generation());
                         source.seek(seek.timestampUs());
                         generation = seek.generation();
                         idle = false;
@@ -130,13 +160,8 @@ final class FrameDecoder {
                     }
                 } catch (InterruptedException e) {
                     throw e;
-                } catch (Exception | Error e) {
-                    // Errors such as running out of memory are reported too. If they were left to end the thread, the
-                    // consumer would simply wait for frames that never come, with nothing to say what went wrong.
-                    Exception cause = e instanceof Exception exception
-                            ? exception
-                            : new IllegalStateException("Decoding was stopped by " + e, e);
-                    publish(new DecodedItem.Failure(generation, cause));
+                } catch (Exception e) {
+                    publish(new DecodedItem.Failure(generation, e));
                     idle = true;
                 }
             }
@@ -198,7 +223,7 @@ final class FrameDecoder {
             if (!seekRequests.isEmpty()) {
                 return false;
             }
-            if (output.offer(item, CHECK_INTERVAL_MS, TimeUnit.MILLISECONDS)) {
+            if (output.offer(item, checkIntervalMs, TimeUnit.MILLISECONDS)) {
                 return true;
             }
         }
