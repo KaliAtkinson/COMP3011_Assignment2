@@ -17,7 +17,7 @@ import org.bytedeco.javacv.Frame;
 interface FrameEffectsStage {
     /**
      * Applies the stage to the frame, in place. The frame belongs to the caller alone, so changing its pixels is safe.
-     * Always called on the decoder thread.
+     * May be called from several threads at once, each with a different frame, so implementations must be thread-safe.
      */
     void apply(Frame frame, InfoFrame info) throws Exception;
 }

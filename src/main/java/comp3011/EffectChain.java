@@ -24,9 +24,20 @@ import org.bytedeco.javacv.Frame;
  * </p>
  *
  * <p>
- * A chain belongs to one playback session and is <b>not thread-safe</b>: it must be used by one thread at a time. That
- * is also what makes it safe, because the processors it holds are stateful (they are initialised, and a few keep
- * caches), and nothing else may touch them while a session is running.
+ * <b>Thread safety.</b> A chain belongs to one playback session, and {@link #apply} may be called from several threads
+ * at once, each with a different frame. Two things make that safe:
+ * </p>
+ * <ul>
+ * <li>Initialisation is a critical region. It must finish, exactly once, before any thread processes a frame, so the
+ * first threads to arrive take a lock, and the rest wait for the initialisation to finish rather than carrying on.</li>
+ * <li>Once initialised, each processor only ever reads its own state while processing a frame, so any number of frames
+ * can be processed at the same time. Processors are required to behave that way. Keeping a scratch buffer in a field
+ * is not allowed, for example, and the processors that used to do it now keep their scratch data local to each call.</li>
+ * </ul>
+ *
+ * <p>
+ * Nothing else may touch the processors while a session is running: they are stateful, and initialising them again
+ * would disturb frames that are still being processed.
  * </p>
  */
 final class EffectChain implements FrameEffectsStage {
@@ -42,7 +53,8 @@ final class EffectChain implements FrameEffectsStage {
 
     private final List<FrameProcessor> processors;
     private final MediaProperties media;
-    private boolean initialised;
+    private final Object initialiseLock = new Object();
+    private volatile boolean initialised; // Written only under the lock. volatile so that other threads see it, and everything the initialisation did, once it is true.
 
     EffectChain(List<FrameProcessor> processors, MediaProperties media) {
         this.processors = List.copyOf(processors);
@@ -51,9 +63,13 @@ final class EffectChain implements FrameEffectsStage {
 
     @Override
     public void apply(Frame frame, InfoFrame info) throws Exception {
-        if (!initialised) {
-            initialiseProcessors(frame);
-            initialised = true;
+        if (!initialised) { // The common case, once running, costs one volatile read and no locking.
+            synchronized (initialiseLock) {
+                if (!initialised) { // Another thread may have finished the job while this one waited for the lock.
+                    initialiseProcessors(frame);
+                    initialised = true;
+                }
+            }
         }
 
         for (FrameProcessor processor : processors) {

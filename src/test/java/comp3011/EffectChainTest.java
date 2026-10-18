@@ -14,7 +14,14 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.bytedeco.javacv.Frame;
 import org.junit.jupiter.api.Test;
@@ -139,5 +146,96 @@ class EffectChainTest {
         processor.failInitialise = false;
         chain.apply(frame(), new InfoFrame(1, 41_667));
         assertEquals(List.of("A initialise", "A frame 1"), log);
+    }
+
+    /**
+     * A processor that is slow to initialise and that notices if it is ever asked to process a frame before it has
+     * finished initialising, or if it is initialised more than once.
+     */
+    private static class SlowInitialisingProcessor extends FrameProcessor {
+        final AtomicInteger initialiseCalls = new AtomicInteger();
+        final AtomicInteger framesBeforeInitialised = new AtomicInteger();
+        final AtomicInteger framesProcessed = new AtomicInteger();
+        private volatile boolean ready;
+
+        @Override
+        public void initialise(InfoVideo videoInfo) throws Exception {
+            initialiseCalls.incrementAndGet();
+            Thread.sleep(100); // Long enough that the other threads arrive while this one is still working.
+            super.initialise(videoInfo);
+            ready = true;
+        }
+
+        @Override
+        public void process(Frame frame, InfoFrame info) {
+            if (!ready) {
+                framesBeforeInitialised.incrementAndGet();
+            }
+            framesProcessed.incrementAndGet();
+        }
+    }
+
+    @Test
+    void manyThreadsArrivingTogetherInitialiseOnceAndNoneProcessesBeforeItIsDone() throws Exception {
+        int threads = 8;
+        SlowInitialisingProcessor processor = new SlowInitialisingProcessor();
+        EffectChain chain = new EffectChain(List.of(processor), MEDIA);
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        CountDownLatch allReady = new CountDownLatch(threads);
+        CountDownLatch go = new CountDownLatch(1);
+        try {
+            List<Future<?>> futures = new ArrayList<>();
+            for (int t = 0; t < threads; t++) {
+                int frameNumber = t;
+                futures.add(pool.submit(() -> {
+                    allReady.countDown();
+                    go.await(); // Release every thread at the same moment.
+                    chain.apply(frame(), new InfoFrame(frameNumber, frameNumber * 41_667L));
+                    return null;
+                }));
+            }
+            allReady.await();
+            go.countDown();
+            for (Future<?> future : futures) {
+                future.get(10, TimeUnit.SECONDS);
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+
+        assertEquals(1, processor.initialiseCalls.get(), "initialised more than once");
+        assertEquals(0, processor.framesBeforeInitialised.get(), "a frame was processed before initialisation finished");
+        assertEquals(threads, processor.framesProcessed.get());
+    }
+
+    @Test
+    void framesProcessedConcurrentlyAreAllSeenByEveryProcessor() throws Exception {
+        List<String> log = Collections.synchronizedList(new ArrayList<>());
+        EffectChain chain = new EffectChain(
+                List.of(new RecordingProcessor("A", log), new RecordingProcessor("B", log)), MEDIA);
+        chain.apply(frame(), new InfoFrame(0, 0)); // Initialise first, so only the processing is concurrent.
+        log.clear();
+
+        ExecutorService pool = Executors.newFixedThreadPool(6);
+        try {
+            List<Future<?>> futures = new ArrayList<>();
+            for (int n = 1; n <= 100; n++) {
+                int frameNumber = n;
+                futures.add(pool.submit(() -> {
+                    chain.apply(frame(), new InfoFrame(frameNumber, frameNumber * 41_667L));
+                    return null;
+                }));
+            }
+            for (Future<?> future : futures) {
+                future.get(10, TimeUnit.SECONDS);
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+
+        assertEquals(200, log.size());
+        for (int n = 1; n <= 100; n++) {
+            assertEquals(true, log.contains("A frame " + n) && log.contains("B frame " + n), "frame " + n);
+        }
     }
 }
