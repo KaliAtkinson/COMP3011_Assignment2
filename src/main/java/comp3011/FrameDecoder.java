@@ -13,6 +13,10 @@ package comp3011;
 import java.util.Iterator;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Future;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -29,7 +33,10 @@ import org.bytedeco.javacv.Frame;
  * thread communicates with it through two thread-safe queues and nothing else:
  * </p>
  * <ul>
- * <li>Results go out through a <i>bounded</i> queue. When the consumer falls behind the queue fills up and the
+ * <li>Results go out through a <i>bounded</i> queue of futures, in the order the media was decoded. A future is
+ * handed over as soon as its work has been started, whether or not it has finished, and the consumer only ever takes
+ * the one at the head of the queue once it is done. That keeps results in order however long each one takes.</li>
+ * <li>The queue is <i>bounded</i>. When the consumer falls behind the queue fills up and the
  * decoder blocks, so decoding can never run away from the display and use unlimited memory (back-pressure).</li>
  * <li>Seek requests come in through a second queue. The decoder looks at it between frames and also while it is
  * waiting for room in the output queue, so a seek is noticed within a few milliseconds.</li>
@@ -54,10 +61,15 @@ final class FrameDecoder {
     private record SeekRequest(int generation, long timestampUs) {
     }
 
+    // A queued result, which may not have finished yet. The generation is kept beside the future so that stale results
+    // can be recognised, and removed, without having to wait for them to finish.
+    private record Queued(int generation, Future<DecodedItem> future) {
+    }
+
     private final MediaSource source; // Used by the decoder thread only once started.
     private final FrameEffectsStage effects;
     private final Function<Frame, byte[]> audioSampler; // Null when there is no audio to extract.
-    private final BlockingQueue<DecodedItem> output;
+    private final BlockingQueue<Queued> output;
     private final BlockingQueue<SeekRequest> seekRequests = new LinkedBlockingQueue<>();
     private final AtomicInteger latestGeneration = new AtomicInteger();
     private final Thread thread = new Thread(this::run, "frame-decoder");
@@ -112,20 +124,43 @@ final class FrameDecoder {
         return generation;
     }
 
-    // Removes every queued item that was decoded for a position older than the given generation. This removes items one
-    // at a time through the iterator, rather than with removeIf, because only the former wakes a decoder that is waiting
-    // for room in a full queue. removeIf frees the room but leaves the decoder asleep until its wait runs out.
+    // Removes every queued item that was decoded for a position older than the given generation, and cancels any of
+    // them whose work has not finished, so that nobody wastes time on results that will never be used. This removes
+    // items one at a time through the iterator, rather than with removeIf, because only the former wakes a decoder that
+    // is waiting for room in a full queue. removeIf frees the room but leaves the decoder asleep until its wait runs out.
     private void discardStaleItems(int currentGeneration) {
-        for (Iterator<DecodedItem> items = output.iterator(); items.hasNext();) {
-            if (items.next().generation() < currentGeneration) {
+        for (Iterator<Queued> items = output.iterator(); items.hasNext();) {
+            Queued queued = items.next();
+            if (queued.generation() < currentGeneration) {
                 items.remove();
+                queued.future().cancel(false);
             }
         }
     }
 
-    /** The next decoded item, or null if there is none yet. Never blocks. */
+    /**
+     * The next decoded item, or null if the next one is not ready yet. Never blocks. Items always come out in the
+     * order they were decoded, so a finished item waits behind an unfinished one that was decoded before it.
+     * Meant to be called by one thread at a time.
+     */
     DecodedItem poll() {
-        return output.poll();
+        Queued head = output.peek();
+        if (head == null || !head.future().isDone() || !output.remove(head)) {
+            return null;
+        }
+
+        try {
+            return head.future().get();
+        } catch (CancellationException e) {
+            return null;
+        } catch (ExecutionException e) {
+            return new DecodedItem.Failure(
+                    latestGeneration.get(),
+                    new IllegalStateException("A decoding task failed", e.getCause()));
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return null;
+        }
     }
 
     /** Asks the decoder to stop and close its source. Returns immediately; see {@link #awaitTermination(long)}. */
@@ -219,19 +254,26 @@ final class FrameDecoder {
         return true;
     }
 
-    /**
-     * Puts an item in the output queue, waiting for room if it is full. Gives up quietly, dropping the item, if the
-     * decoder has been asked to stop or a seek has made the item stale. Returns whether the item was queued.
-     */
+    /** Queues an item whose work is already done. */
     private boolean publish(DecodedItem item) throws InterruptedException {
+        return publish(item.generation(), CompletableFuture.completedFuture(item));
+    }
+
+    /**
+     * Puts a result in the output queue, waiting for room if it is full. Gives up quietly, cancelling the result, if the
+     * decoder has been asked to stop or a seek has made the result stale. Returns whether the result was queued.
+     */
+    private boolean publish(int generation, Future<DecodedItem> result) throws InterruptedException {
+        Queued queued = new Queued(generation, result);
         while (!stopRequested) {
             if (!seekRequests.isEmpty()) {
-                return false;
+                break;
             }
-            if (output.offer(item, checkIntervalMs, TimeUnit.MILLISECONDS)) {
+            if (output.offer(queued, checkIntervalMs, TimeUnit.MILLISECONDS)) {
                 return true;
             }
         }
+        result.cancel(false);
         return false;
     }
 }
