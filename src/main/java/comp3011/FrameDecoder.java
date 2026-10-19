@@ -16,8 +16,11 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
@@ -25,12 +28,16 @@ import java.util.function.Function;
 import org.bytedeco.javacv.Frame;
 
 /**
- * Decodes media on a thread of its own, so that decoding and applying effects no longer compete with the JavaFX thread
- * for time.
+ * Decodes media on a thread of its own, and applies the effects to the decoded frames on a pool of worker threads, so
+ * that neither competes with the JavaFX thread for time and the effects can use every core of the machine.
  *
  * <p>
- * <b>Threading design.</b> The decoder thread is the only thread that ever touches the {@link MediaSource}. Every other
- * thread communicates with it through two thread-safe queues and nothing else:
+ * <b>Threading design.</b> There are three kinds of thread. The <i>decoder thread</i> is the only thread that ever
+ * touches the {@link MediaSource}. It decodes frames one after another, which cannot be split up, because each frame
+ * depends on those before it. Applying the effects to a frame, on the other hand, does not depend on any other frame,
+ * so the decoder hands each decoded frame to a <i>worker thread</i> and carries straight on decoding. Several frames
+ * are therefore in the effects at the same time, one per worker. The third kind is whoever consumes the results, which
+ * is the JavaFX thread. It communicates with the decoder through two thread-safe queues and nothing else:
  * </p>
  * <ul>
  * <li>Results go out through a <i>bounded</i> queue of futures, in the order the media was decoded. A future is
@@ -51,12 +58,25 @@ import org.bytedeco.javacv.Frame;
  *
  * <p>
  * <b>Frame ownership.</b> The source is allowed to reuse one {@link Frame} object for every grab. Each video frame is
- * therefore copied straight away, and it is the copy that has the effects applied and is queued.
+ * therefore copied straight away, and the copy is handed to exactly one worker, which is the only thread to touch it
+ * until the finished frame is passed on through the queue.
+ * </p>
+ *
+ * <p>
+ * <b>Order.</b> Workers finish in no particular order, but results are queued in the order the frames were decoded and
+ * are only handed out from the front of the queue, so the consumer always sees them in order.
+ * </p>
+ *
+ * <p>
+ * <b>Stopping.</b> When the decoder thread ends, it first stops the workers and waits for all of them to finish, and
+ * only then closes the source. Anyone who waits for the decoder thread to end can therefore be sure that nothing is
+ * still using the effects.
  * </p>
  */
 final class FrameDecoder {
     /** How often a waiting decoder wakes to check whether it has been asked to seek or stop. */
     private static final long DEFAULT_CHECK_INTERVAL_MS = 20;
+    private static final long WORKER_STOP_TIMEOUT_SECONDS = 10;
 
     private record SeekRequest(int generation, long timestampUs) {
     }
@@ -69,6 +89,7 @@ final class FrameDecoder {
     private final MediaSource source; // Used by the decoder thread only once started.
     private final FrameEffectsStage effects;
     private final Function<Frame, byte[]> audioSampler; // Null when there is no audio to extract.
+    private final ExecutorService workers;
     private final BlockingQueue<Queued> output;
     private final BlockingQueue<SeekRequest> seekRequests = new LinkedBlockingQueue<>();
     private final AtomicInteger latestGeneration = new AtomicInteger();
@@ -77,32 +98,62 @@ final class FrameDecoder {
     private volatile boolean stopRequested;
 
     /**
-     * @param source       where frames come from; the decoder takes ownership and closes it when it stops
-     * @param effects      applied to each video frame on the decoder thread
-     * @param audioSampler turns an audio frame into bytes for the sound card, or null if audio is not wanted
-     * @param capacity     how many decoded items may wait in the output queue before the decoder blocks
+     * A decoder with a single worker, which applies the effects to one frame at a time.
+     *
+     * @see #FrameDecoder(MediaSource, FrameEffectsStage, Function, int, int, long)
      */
     FrameDecoder(MediaSource source, FrameEffectsStage effects, Function<Frame, byte[]> audioSampler, int capacity) {
-        this(source, effects, audioSampler, capacity, DEFAULT_CHECK_INTERVAL_MS);
+        this(source, effects, audioSampler, capacity, 1);
+    }
+
+    /** @see #FrameDecoder(MediaSource, FrameEffectsStage, Function, int, int, long) */
+    FrameDecoder(
+            MediaSource source,
+            FrameEffectsStage effects,
+            Function<Frame, byte[]> audioSampler,
+            int capacity,
+            int workerThreads) {
+        this(source, effects, audioSampler, capacity, workerThreads, DEFAULT_CHECK_INTERVAL_MS);
     }
 
     /**
-     * As above, but also sets how often a waiting decoder wakes of its own accord to look for a request. Normally a
-     * decoder is woken at once when there is something for it to do, and this only matters as a safety net. A test can
-     * set it very long to prove that the prompt wake-ups really happen.
+     * @param source          where frames come from; the decoder takes ownership and closes it when it stops
+     * @param effects         applied to each video frame on a worker thread; must be safe to call from several threads
+     * @param audioSampler    turns an audio frame into bytes for the sound card, or null if audio is not wanted
+     * @param capacity        how many decoded items may wait in the output queue before the decoder blocks. This is also
+     *                        the most frames that can be in the effects at once, so it should comfortably exceed the
+     *                        number of workers, or some of them will have nothing to do.
+     * @param workerThreads   how many frames may have their effects applied at the same time
+     * @param checkIntervalMs how often a waiting decoder wakes of its own accord to look for a request. Normally a
+     *                        decoder is woken at once when there is something for it to do, and this only matters as a
+     *                        safety net. A test can set it very long to prove that the prompt wake-ups really happen.
      */
     FrameDecoder(
             MediaSource source,
             FrameEffectsStage effects,
             Function<Frame, byte[]> audioSampler,
             int capacity,
+            int workerThreads,
             long checkIntervalMs) {
         this.checkIntervalMs = checkIntervalMs;
         this.source = source;
         this.effects = effects;
         this.audioSampler = audioSampler;
         this.output = new ArrayBlockingQueue<>(capacity);
+        this.workers = Executors.newFixedThreadPool(workerThreads, new WorkerThreadFactory());
         thread.setDaemon(true); // A forgotten decoder must never keep the application alive.
+    }
+
+    /** Makes the worker threads daemons, so that forgotten workers can never keep the application alive, and names them. */
+    private static final class WorkerThreadFactory implements ThreadFactory {
+        private final AtomicInteger count = new AtomicInteger();
+
+        @Override
+        public Thread newThread(Runnable task) {
+            Thread worker = new Thread(task, "frame-worker-" + count.incrementAndGet());
+            worker.setDaemon(true);
+            return worker;
+        }
     }
 
     /** Starts decoding from wherever the source is currently positioned, as generation 0. */
@@ -208,7 +259,21 @@ final class FrameDecoder {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt(); // Treat an interrupt as a request to stop.
         } finally {
+            stopWorkers();
             source.close(); // The thread that used the source is the one that closes it.
+        }
+    }
+
+    // Cancels the work that has not started, then waits for the work that has. Only when this returns is it certain that
+    // no worker is still applying effects to a frame.
+    private void stopWorkers() {
+        workers.shutdownNow();
+        try {
+            if (!workers.awaitTermination(WORKER_STOP_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+                System.err.println("WARNING: frame workers did not stop within " + WORKER_STOP_TIMEOUT_SECONDS + "s");
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         }
     }
 
@@ -249,9 +314,25 @@ final class FrameDecoder {
 
         int frameNumber = source.frameNumber();
         Frame frame = grabbed.clone(); // The source may overwrite 'grabbed' on its next grab, so work on a copy.
-        effects.apply(frame, new InfoFrame(frameNumber, timestampUs));
-        publish(new DecodedItem.Video(generation, frameNumber, timestampUs, frame, System.nanoTime()));
+
+        // Hand the copy to a worker and carry on decoding. The future goes into the queue now, in decode order, and
+        // becomes available to the consumer once the worker has finished with it.
+        publish(generation, workers.submit(() -> applyEffects(generation, frameNumber, timestampUs, frame)));
         return true;
+    }
+
+    // Runs on a worker thread. A failure becomes an item rather than an exception, so that it is delivered to the
+    // consumer at its proper place in the order, after all the frames before it.
+    private DecodedItem applyEffects(int generation, int frameNumber, long timestampUs, Frame frame) {
+        try {
+            effects.apply(frame, new InfoFrame(frameNumber, timestampUs));
+            return new DecodedItem.Video(generation, frameNumber, timestampUs, frame, System.nanoTime());
+        } catch (Exception | Error e) {
+            Exception cause = e instanceof Exception exception
+                    ? exception
+                    : new IllegalStateException("Applying the effects was stopped by " + e, e);
+            return new DecodedItem.Failure(generation, cause);
+        }
     }
 
     /** Queues an item whose work is already done. */

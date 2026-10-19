@@ -195,7 +195,7 @@ class FrameDecoderTest {
     }
 
     @Test
-    void effectsRunOncePerFrameOnTheDecoderThreadNotTheCallersThread() throws Exception {
+    void effectsRunOncePerFrameOnAWorkerThreadNotOnTheCallersThread() throws Exception {
         FakeMediaSource source = new FakeMediaSource(10, false);
         Set<String> threads = ConcurrentHashMap.newKeySet();
         AtomicInteger applied = new AtomicInteger();
@@ -208,8 +208,8 @@ class FrameDecoderTest {
         collectUntilTerminal(0);
 
         assertEquals(10, applied.get());
-        assertEquals(Set.of("frame-decoder"), threads);
-        assertNotEquals(Thread.currentThread().getName(), "frame-decoder");
+        assertTrue(threads.stream().allMatch(name -> name.startsWith("frame-worker-")), "ran on " + threads);
+        assertFalse(threads.contains(Thread.currentThread().getName()));
     }
 
     @Test
@@ -286,7 +286,7 @@ class FrameDecoderTest {
         // The decoder is told to look for requests only every five seconds, so if it is not woken by the seek itself,
         // the first frame of the new position takes about five seconds to arrive instead of a few milliseconds.
         FakeMediaSource source = new FakeMediaSource(100_000, false);
-        decoder = new FrameDecoder(source, NO_EFFECTS, null, 2, 5_000);
+        decoder = new FrameDecoder(source, NO_EFFECTS, null, 2, 1, 5_000);
         decoder.start();
         Thread.sleep(300); // The decoder is now blocked, waiting for room.
 
