@@ -37,21 +37,28 @@ import javafx.scene.image.Image;
  * </p>
  *
  * <p>
- * <b>Threads.</b> Decoding the media and applying the frame processors happen
- * on a {@link FrameDecoder} thread. Everything else in this class - the clock,
+ * <b>Threads.</b> Decoding the media happens on a {@link FrameDecoder} thread,
+ * and applying the frame processors happens on that decoder's pool of worker
+ * threads, one frame per worker at a time, so that the effects can use every core.
+ * Everything else in this class - the clock,
  * audio writing, showing frames, and every public method - runs on the JavaFX
  * thread, so none of the fields below need locking. The only crossings between
  * the two threads are the decoder's two queues, plus the
  * {@link #audioOutputEnabled} flag, which is volatile for that reason. Once a
  * decoder has been started the FFmpeg grabber belongs to it and is never
- * touched from here again.
+ * touched from here again, and nor are the frame processors, until it has stopped.
  * </p>
  */
 public class VideoPlayerModel {
     private static final long NO_SEEK_REQUEST = -1; // Sentinel value used when no seek position is active.
     private static final long FIVE_SECONDS_US = 5_000_000L;
     private static final long AUDIO_LEAD_NS = 30_000_000L;
-    private static final int DECODER_QUEUE_CAPACITY = 16; // Decoded items (video and audio) the decoder may run ahead.
+    // One worker for each core, since applying the effects is what takes the time and it spreads across all of them.
+    private static final int DECODER_WORKER_THREADS = Math.max(1, Runtime.getRuntime().availableProcessors());
+    // Decoded items (video and audio) the decoder may run ahead. That is also the most frames that can be in the effects
+    // at once, so it must comfortably exceed the number of workers or some would have nothing to do. Every frame in here
+    // is a full copy of a decoded picture, so it is kept no larger than that needs.
+    private static final int DECODER_QUEUE_CAPACITY = 2 * DECODER_WORKER_THREADS + 8;
     private static final int MAX_READY_FRAMES = 4; // Decoded video frames held here waiting for their moment.
     private static final long DECODER_STOP_TIMEOUT_MS = 2_000;
     private static final byte[] NO_AUDIO = new byte[0];
@@ -311,7 +318,7 @@ public class VideoPlayerModel {
                 ? frame -> audioOutputEnabled ? player.copySamples(frame) : NO_AUDIO
                 : null;
 
-        decoder = new FrameDecoder(source, effectChain, audioSampler, DECODER_QUEUE_CAPACITY);
+        decoder = new FrameDecoder(source, effectChain, audioSampler, DECODER_QUEUE_CAPACITY, DECODER_WORKER_THREADS);
         activeGeneration = 0;
         decoder.start();
     }
@@ -367,7 +374,7 @@ public class VideoPlayerModel {
             switch (item) {
                 case DecodedItem.Video video -> readyFrames.add(video);
                 case DecodedItem.Audio audio -> queueAudio(audio);
-                case DecodedItem.EndOfStream _ -> endOfStreamReached = true;
+                case DecodedItem.EndOfStream end -> endOfStreamReached = true;
                 case DecodedItem.Failure failure -> pendingFailure = failure.cause();
             }
         }
