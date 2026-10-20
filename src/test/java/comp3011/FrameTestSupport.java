@@ -10,6 +10,7 @@
  */
 package comp3011;
 
+import java.lang.ref.Reference;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
@@ -69,6 +70,11 @@ final class FrameTestSupport {
         buffer.clear();
         byte[] bytes = new byte[buffer.remaining()];
         buffer.get(bytes);
+        // A frame's pixels live in native memory that is freed once the Frame can no longer be reached, and the JVM may
+        // consider the frame unreachable as soon as it is no longer used, which is before the copy above has finished.
+        // Other threads allocating frames can then free the memory and reuse it while it is still being read. The fence
+        // keeps the frame alive until the copy is done.
+        Reference.reachabilityFence(frame);
         return bytes;
     }
 

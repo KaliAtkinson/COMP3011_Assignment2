@@ -11,6 +11,7 @@
 package comp3011;
 
 import java.io.File;
+import java.lang.ref.Reference;
 import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.List;
@@ -435,6 +436,13 @@ public class VideoPlayerModel {
         } catch (Exception e) {
             handlePlaybackError(e);
             return;
+        } finally {
+            // The pixels of a frame are in native memory that is freed once the Frame can no longer be reached, and the
+            // JVM may treat the frame as unreachable as soon as it is no longer used, which is while the converter is
+            // still copying from it. The decoder thread allocates a new frame for every frame it decodes, and that is when
+            // freed memory gets released and reused, so without this the copy can read pixels from the next frame
+            // (a torn picture) or from freed memory. The fence keeps the frame alive until the conversion has finished.
+            Reference.reachabilityFence(video);
         }
         notifyFrameReady(image);
     }

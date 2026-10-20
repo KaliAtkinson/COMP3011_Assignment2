@@ -187,10 +187,9 @@ class FrameDecoderTest {
 
         for (int n = 0; n < 20; n++) {
             DecodedItem.Video video = (DecodedItem.Video) items.get(n);
-            ByteBuffer pixels = ((ByteBuffer) video.frame().image[0]).duplicate();
-            pixels.clear();
-            assertEquals((byte) n, pixels.get(0), "frame " + n + " was overwritten after it was queued");
-            assertEquals((byte) n, pixels.get(pixels.limit() - 1), "frame " + n + " was overwritten after it was queued");
+            byte[] pixels = FrameTestSupport.pixelsOf(video.frame());
+            assertEquals((byte) n, pixels[0], "frame " + n + " was overwritten after it was queued");
+            assertEquals((byte) n, pixels[pixels.length - 1], "frame " + n + " was overwritten after it was queued");
         }
     }
 
@@ -222,7 +221,7 @@ class FrameDecoderTest {
 
         DecodedItem.Video video = nextVideo(0);
 
-        assertEquals((byte) 99, ((ByteBuffer) video.frame().image[0]).get(0));
+        assertEquals((byte) 99, FrameTestSupport.pixelsOf(video.frame())[0]);
     }
 
     @Test
