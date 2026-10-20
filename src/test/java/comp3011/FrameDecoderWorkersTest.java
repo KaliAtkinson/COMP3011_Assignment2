@@ -172,7 +172,6 @@ class FrameDecoderWorkersTest {
         AtomicInteger running = new AtomicInteger();
         AtomicInteger mostAtOnce = new AtomicInteger();
         int frames = 48;
-        long serialMs = frames * 20L;
         start(new NumberedSource(frames, false), (frame, info) -> {
             int now = running.incrementAndGet();
             mostAtOnce.accumulateAndGet(now, Math::max);
@@ -180,12 +179,11 @@ class FrameDecoderWorkersTest {
             running.decrementAndGet();
         }, 32, 8);
 
-        long began = System.nanoTime();
         collectUntilTerminal(0);
-        long elapsedMs = (System.nanoTime() - began) / 1_000_000L;
 
+        // How many frames were in the effects at once does not depend on how fast or how busy the machine is, unlike how
+        // long the whole thing took, so that is what this checks.
         assertTrue(mostAtOnce.get() >= 4, "only " + mostAtOnce.get() + " frames were ever in the effects at once");
-        assertTrue(elapsedMs < serialMs * 3 / 4, elapsedMs + "ms is not much faster than one at a time (" + serialMs + "ms)");
     }
 
     @Test
@@ -207,8 +205,13 @@ class FrameDecoderWorkersTest {
             applied.add(info.frameNumber());
         }, 8, 1);
         assertTrue(firstFrameStarted.await(WAIT_MS, TimeUnit.MILLISECONDS));
-        Thread.sleep(300); // Let the decoder fill the queue.
-        assertTrue(source.grabCount.get() >= 8, "the decoder never got ahead, so this test shows nothing");
+        // Wait for the decoder to get ahead and fill the queue, however long that takes on this machine.
+        long ready = System.nanoTime() + WAIT_MS * 1_000_000L;
+        while (source.grabCount.get() < 9 && System.nanoTime() < ready) {
+            Thread.sleep(5);
+        }
+        assertTrue(source.grabCount.get() >= 9, "the decoder never got ahead, so this test shows nothing");
+        Thread.sleep(50); // Let it settle on the full queue.
 
         int generation = decoder.seek(50_000 * FRAME_US);
 
