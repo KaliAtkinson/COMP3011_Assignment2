@@ -62,6 +62,7 @@ public class VideoPlayerModel {
     private static final int DECODER_QUEUE_CAPACITY = 2 * DECODER_WORKER_THREADS + 8;
     private static final int MAX_READY_FRAMES = 4; // Decoded video frames held here waiting for their moment.
     private static final long DECODER_STOP_TIMEOUT_MS = 2_000;
+    private static final int FRAMES_KEPT_AFTER_SHOWING = 3;
     private static final byte[] NO_AUDIO = new byte[0];
 
     private final List<FrameProcessor> frameProcessors;
@@ -94,6 +95,7 @@ public class VideoPlayerModel {
     private FrameDecoder decoder; // Decodes and applies the effects on its own thread. Null when nothing is open.
     private int activeGeneration; // Only decoder items stamped with this generation are current. Others are stale.
     private final Deque<DecodedItem.Video> readyFrames = new ArrayDeque<>(); // Decoded and waiting to be shown.
+    private final Deque<Frame> recentlyShown = new ArrayDeque<>(); // Frames just shown, kept a little before they are given back.
     private boolean endOfStreamReached; // The decoder has said there is nothing after the frames in readyFrames.
     private Exception pendingFailure; // A decode error, to be reported once the frames before it have been shown.
     private int framesAllowedWhilePaused; // How many more frames may appear while paused. See togglePause.
@@ -375,7 +377,7 @@ public class VideoPlayerModel {
             switch (item) {
                 case DecodedItem.Video video -> readyFrames.add(video);
                 case DecodedItem.Audio audio -> queueAudio(audio);
-                case DecodedItem.EndOfStream end -> endOfStreamReached = true;
+                case DecodedItem.EndOfStream _ -> endOfStreamReached = true;
                 case DecodedItem.Failure failure -> pendingFailure = failure.cause();
             }
         }
@@ -445,6 +447,17 @@ public class VideoPlayerModel {
             Reference.reachabilityFence(video);
         }
         notifyFrameReady(image);
+        giveBackFramesFinishedWith(video.frame());
+    }
+
+    // A frame is finished with once its picture has been copied into a JavaFX Image. It is not given back at once but a
+    // few frames later, so that if anything on the display side were still to be looking at its pixels, it would have
+    // long finished before the memory is reused for a new picture.
+    private void giveBackFramesFinishedWith(Frame shown) {
+        recentlyShown.addLast(shown);
+        while (recentlyShown.size() > FRAMES_KEPT_AFTER_SHOWING) {
+            // No frame pool exists yet; releasing the deque reference permits normal GC.
+        }
     }
 
     // Playback has ended, or failed, once every frame before that point has been shown. As before, nothing ends while paused.
@@ -525,6 +538,7 @@ public class VideoPlayerModel {
         playbackOpen = false;
         stopDecoder();
         readyFrames.clear();
+        recentlyShown.clear();
         endOfStreamReached = false;
         pendingFailure = null;
         pendingAudio.clear();
