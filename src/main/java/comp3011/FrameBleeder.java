@@ -118,40 +118,19 @@ public class FrameBleeder extends FrameProcessor {
         }
     }
 
-    private void buildBrightMask(ByteBuffer pixels, double[] brightMask) {
-        int width = videoInfo.imageWidth();
-        int height = videoInfo.imageHeight();
-        int channels = videoInfo.imageChannels();
-        int stride = videoInfo.imageStride();
+    // The brightness a block contributes depends only on the block's brightest luminance, which is a whole number from 0
+    // to 255, so each of the 256 possible answers is worked out once rather than for every block of every frame.
+    private static final double[] BRIGHTNESS_BY_LUMINANCE = buildBrightnessTable();
 
-        for (int maskY = 0; maskY < maskHeight; maskY++) {
-            int blockY = maskY * MASK_BLOCK_SIZE;
-            int blockYEnd = Math.min(blockY + MASK_BLOCK_SIZE, height);
-
-            for (int maskX = 0; maskX < maskWidth; maskX++) {
-                int blockX = maskX * MASK_BLOCK_SIZE;
-                int blockXEnd = Math.min(blockX + MASK_BLOCK_SIZE, width);
-                int maximumLuminance = 0;
-
-                for (int y = blockY; y < blockYEnd; y++) {
-                    int rowStart = y * stride;
-                    for (int x = blockX; x < blockXEnd; x++) {
-                        int base = rowStart + x * channels;
-                        // JavaCV supplies these decoded frames in BGR byte order.
-                        int b = Byte.toUnsignedInt(pixels.get(base));
-                        int g = Byte.toUnsignedInt(pixels.get(base + 1));
-                        int r = Byte.toUnsignedInt(pixels.get(base + 2));
-                        int luminance = (54 * r + 183 * g + 19 * b) / 256;
-                        maximumLuminance = Math.max(maximumLuminance, luminance);
-                    }
-                }
-
-                brightMask[maskY * maskWidth + maskX] = thresholdedBrightness(maximumLuminance);
-            }
+    private static double[] buildBrightnessTable() {
+        double[] table = new double[256];
+        for (int luminance = 0; luminance < table.length; luminance++) {
+            table[luminance] = thresholdedBrightness(luminance);
         }
+        return table;
     }
 
-    private double thresholdedBrightness(int luminance) {
+    private static double thresholdedBrightness(int luminance) {
         if (luminance <= BLEED_LUMINANCE_THRESHOLD) {
             return 0.0;
         }
@@ -160,80 +139,188 @@ public class FrameBleeder extends FrameProcessor {
         return Math.pow(normalised, BLEED_GAMMA);
     }
 
+    // Finds the brightest pixel in each block. The frame is read a whole row of blocks at a time into an array, which is
+    // far faster than reading it a byte at a time from the buffer, and gives exactly the same answers.
+    private void buildBrightMask(ByteBuffer pixels, double[] brightMask) {
+        int width = videoInfo.imageWidth();
+        int height = videoInfo.imageHeight();
+        int channels = videoInfo.imageChannels();
+        int stride = videoInfo.imageStride();
+        byte[] rows = new byte[MASK_BLOCK_SIZE * stride];
+
+        for (int maskY = 0; maskY < maskHeight; maskY++) {
+            int blockY = maskY * MASK_BLOCK_SIZE;
+            int rowCount = Math.min(blockY + MASK_BLOCK_SIZE, height) - blockY;
+            pixels.get(blockY * stride, rows, 0, rowCount * stride);
+
+            for (int maskX = 0; maskX < maskWidth; maskX++) {
+                int blockX = maskX * MASK_BLOCK_SIZE;
+                int blockXEnd = Math.min(blockX + MASK_BLOCK_SIZE, width);
+                int maximumLuminance = 0;
+
+                for (int row = 0; row < rowCount; row++) {
+                    int rowStart = row * stride;
+                    for (int x = blockX; x < blockXEnd; x++) {
+                        int base = rowStart + x * channels;
+                        // JavaCV supplies these decoded frames in BGR byte order.
+                        int b = rows[base] & 0xFF;
+                        int g = rows[base + 1] & 0xFF;
+                        int r = rows[base + 2] & 0xFF;
+                        int luminance = (54 * r + 183 * g + 19 * b) / 256;
+                        if (luminance > maximumLuminance) {
+                            maximumLuminance = luminance;
+                        }
+                    }
+                }
+
+                brightMask[maskY * maskWidth + maskX] = BRIGHTNESS_BY_LUMINANCE[maximumLuminance];
+            }
+        }
+    }
+
+    private static final int BLUR_SAMPLES = 2 * BLUR_RADIUS + 1;
+
+    // Away from the edges every sample is inside the mask, so the clamping can be skipped. The samples are still added up
+    // in the same order, which matters because floating point addition is not associative.
     private void blurHorizontally(double[] source, double[] destination) {
         for (int y = 0; y < maskHeight; y++) {
             int rowStart = y * maskWidth;
             for (int x = 0; x < maskWidth; x++) {
                 double total = 0.0;
-                int samples = 0;
 
-                for (int dx = -BLUR_RADIUS; dx <= BLUR_RADIUS; dx++) {
-                    int sampleX = clamp(x + dx, 0, maskWidth - 1);
-                    total += source[rowStart + sampleX];
-                    samples++;
+                if (x >= BLUR_RADIUS && x < maskWidth - BLUR_RADIUS) {
+                    for (int dx = -BLUR_RADIUS; dx <= BLUR_RADIUS; dx++) {
+                        total += source[rowStart + x + dx];
+                    }
+                } else {
+                    for (int dx = -BLUR_RADIUS; dx <= BLUR_RADIUS; dx++) {
+                        total += source[rowStart + clamp(x + dx, 0, maskWidth - 1)];
+                    }
                 }
 
-                destination[rowStart + x] = total / samples;
+                destination[rowStart + x] = total / BLUR_SAMPLES;
             }
         }
     }
 
     private void blurVertically(double[] source, double[] destination) {
         for (int y = 0; y < maskHeight; y++) {
+            boolean interior = y >= BLUR_RADIUS && y < maskHeight - BLUR_RADIUS;
             for (int x = 0; x < maskWidth; x++) {
                 double total = 0.0;
-                int samples = 0;
 
-                for (int dy = -BLUR_RADIUS; dy <= BLUR_RADIUS; dy++) {
-                    int sampleY = clamp(y + dy, 0, maskHeight - 1);
-                    total += source[sampleY * maskWidth + x];
-                    samples++;
+                if (interior) {
+                    for (int dy = -BLUR_RADIUS; dy <= BLUR_RADIUS; dy++) {
+                        total += source[(y + dy) * maskWidth + x];
+                    }
+                } else {
+                    for (int dy = -BLUR_RADIUS; dy <= BLUR_RADIUS; dy++) {
+                        total += source[clamp(y + dy, 0, maskHeight - 1) * maskWidth + x];
+                    }
                 }
 
-                destination[y * maskWidth + x] = total / samples;
+                destination[y * maskWidth + x] = total / BLUR_SAMPLES;
             }
         }
     }
 
+    // Adds the glow. Most of a typical picture is too dark to glow at all, and a pixel only glows if at least one of the
+    // four mask values it is blended from is above zero, so whole cells and rows that cannot glow are skipped without
+    // working anything out. Where there is a glow, the arithmetic is exactly as before. Each row is read and written back
+    // in one go instead of a byte at a time.
     private void applyBleed(ByteBuffer pixels, double[] blurredMask) {
         int width = videoInfo.imageWidth();
         int height = videoInfo.imageHeight();
         int channels = videoInfo.imageChannels();
         int stride = videoInfo.imageStride();
+        int rowBytes = width * channels;
+        byte[] row = new byte[rowBytes];
+        boolean[] cellCanGlow = new boolean[maskWidth];
+        boolean rowCanGlow = false;
+        int cellsWorkedOutFor = -1;
 
         for (int y = 0; y < height; y++) {
+            int y0 = yMaskTop[y];
+            int y1 = Math.min(y0 + 1, maskHeight - 1);
+            double yBlend = yMaskBlend[y];
+
+            if (y0 != cellsWorkedOutFor) {
+                cellsWorkedOutFor = y0;
+                rowCanGlow = false;
+                for (int cell = 0; cell < maskWidth; cell++) {
+                    int next = Math.min(cell + 1, maskWidth - 1);
+                    boolean canGlow = blurredMask[y0 * maskWidth + cell] != 0.0
+                            || blurredMask[y0 * maskWidth + next] != 0.0
+                            || blurredMask[y1 * maskWidth + cell] != 0.0
+                            || blurredMask[y1 * maskWidth + next] != 0.0;
+                    cellCanGlow[cell] = canGlow;
+                    rowCanGlow |= canGlow;
+                }
+            }
+            if (!rowCanGlow) {
+                continue;
+            }
+
             int rowStart = y * stride;
+            pixels.get(rowStart, row, 0, rowBytes);
+            boolean changed = false;
+
+            // The four mask values a pixel is blended from only change every few pixels, so they are looked up once per
+            // cell. The differences between them are also worked out once per cell. Each pixel then does exactly the same
+            // arithmetic as lerp(a, b, blend) = a + (b - a) * blend, in the same order, so the answers are identical.
+            int topRow = y0 * maskWidth;
+            int bottomRow = y1 * maskWidth;
+            int cellOf = -1;
+            boolean canGlow = false;
+            double topLeft = 0.0;
+            double bottomLeft = 0.0;
+            double topStep = 0.0;
+            double bottomStep = 0.0;
 
             for (int x = 0; x < width; x++) {
-                double bleedStrength = sampleBlurredMask(blurredMask, x, y);
+                int x0 = xMaskLeft[x];
+                if (x0 != cellOf) {
+                    cellOf = x0;
+                    canGlow = cellCanGlow[x0];
+                    if (canGlow) {
+                        int x1 = Math.min(x0 + 1, maskWidth - 1);
+                        topLeft = blurredMask[topRow + x0];
+                        bottomLeft = blurredMask[bottomRow + x0];
+                        topStep = blurredMask[topRow + x1] - topLeft;
+                        bottomStep = blurredMask[bottomRow + x1] - bottomLeft;
+                    }
+                }
+                if (!canGlow) {
+                    continue;
+                }
+
+                double xBlend = xMaskBlend[x];
+                double top = topLeft + topStep * xBlend;
+                double bottom = bottomLeft + bottomStep * xBlend;
+                double bleedStrength = Math.min(1.0, (top + (bottom - top) * yBlend) * BLEED_MASK_GAIN);
                 if (bleedStrength <= 0.0) {
                     continue;
                 }
 
-                int blueBoost = (int) Math.round(bleedStrength * BLUE_BLEED_STRENGTH);
-                int greenBoost = (int) Math.round(bleedStrength * GREEN_BLEED_STRENGTH);
-                int redBoost = (int) Math.round(bleedStrength * RED_BLEED_STRENGTH);
-                int base = rowStart + x * channels;
+                int base = x * channels;
+                row[base] = boostedByte(row[base], roundedBoost(bleedStrength * BLUE_BLEED_STRENGTH));
+                row[base + 1] = boostedByte(row[base + 1], roundedBoost(bleedStrength * GREEN_BLEED_STRENGTH));
+                row[base + 2] = boostedByte(row[base + 2], roundedBoost(bleedStrength * RED_BLEED_STRENGTH));
+                changed = true;
+            }
 
-                pixels.put(base, boostedByte(pixels.get(base), blueBoost));
-                pixels.put(base + 1, boostedByte(pixels.get(base + 1), greenBoost));
-                pixels.put(base + 2, boostedByte(pixels.get(base + 2), redBoost));
+            if (changed) {
+                pixels.put(rowStart, row, 0, rowBytes);
             }
         }
     }
 
-    private double sampleBlurredMask(double[] blurredMask, int x, int y) {
-        int x0 = xMaskLeft[x];
-        int x1 = Math.min(x0 + 1, maskWidth - 1);
-        double xBlend = xMaskBlend[x];
-
-        int y0 = yMaskTop[y];
-        int y1 = Math.min(y0 + 1, maskHeight - 1);
-        double yBlend = yMaskBlend[y];
-
-        double top = lerp(blurredMask[y0 * maskWidth + x0], blurredMask[y0 * maskWidth + x1], xBlend);
-        double bottom = lerp(blurredMask[y1 * maskWidth + x0], blurredMask[y1 * maskWidth + x1], xBlend);
-        return Math.min(1.0, lerp(top, bottom, yBlend) * BLEED_MASK_GAIN);
+    // The same as (int) Math.round(value) for a value that is not negative and is far below 2^31, but quicker. Rounding
+    // half up is: the whole part, plus one if the fractional part is at least a half. Taking the whole part away from
+    // the value is exact, so no rounding error can creep in.
+    static int roundedBoost(double value) {
+        long whole = (long) value;
+        return (int) (value - whole >= 0.5 ? whole + 1 : whole);
     }
 
     private byte boostedByte(byte value, int boost) {
@@ -246,9 +333,5 @@ public class FrameBleeder extends FrameProcessor {
 
     private double clamp(double value, double min, double max) {
         return Math.max(min, Math.min(value, max));
-    }
-
-    private double lerp(double a, double b, double blend) {
-        return a + (b - a) * blend;
     }
 }
