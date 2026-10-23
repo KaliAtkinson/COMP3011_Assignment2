@@ -214,6 +214,18 @@ final class FrameDecoder {
         }
     }
 
+    /**
+     * Non-blocking diagnostic snapshot. No caller should make playback decisions from these approximate values;
+     * the decoder and workers can advance immediately after the snapshot is taken.
+     */
+    record QueueProbe(int queuedItems, boolean headPending) {
+    }
+
+    QueueProbe queueProbe() {
+        Queued head = output.peek();
+        return new QueueProbe(output.size(), head != null && !head.future().isDone());
+    }
+
     /** Asks the decoder to stop and close its source. Returns immediately; see {@link #awaitTermination(long)}. */
     void shutdown() {
         stopRequested = true;

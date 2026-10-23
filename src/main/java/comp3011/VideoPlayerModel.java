@@ -110,6 +110,8 @@ public class VideoPlayerModel {
     private double frameRate;
     private int intFrameRate;
     private int totalVideoFrames;
+    // Opt-in diagnostics; zero additional per-frame allocations when disabled. Does not change playback decisions.
+    private final PlaybackDiagnostics playbackDiagnostics = PlaybackDiagnostics.enabled() ? new PlaybackDiagnostics() : null;
     private final PlaybackClock clock = new PlaybackClock(); // Maps media timestamps to System.nanoTime() moments.
     private long relativeSeekBaseUs = NO_SEEK_REQUEST;
 
@@ -294,6 +296,9 @@ public class VideoPlayerModel {
     }
 
     private void resetPlaybackClock(long logicalTimestampUs) {
+        if (playbackDiagnostics != null) {
+            playbackDiagnostics.reset();
+        }
         pendingAudio.clear();
         readyFrames.clear();
         endOfStreamReached = false;
@@ -355,11 +360,17 @@ public class VideoPlayerModel {
         if (!playbackOpen) {
             return;
         }
+        if (playbackDiagnostics != null) {
+            playbackDiagnostics.pulse(now);
+        }
 
         drainDecoder();
         writeDueAudio(now);
         displayDueFrame(now);
         reportEndOfPlayback();
+        if (playbackDiagnostics != null && playbackOpen) {
+            playbackDiagnostics.reportIfDue(now, readyFrames.size(), decoder);
+        }
     }
 
     // Moves whatever the decoder has finished into our own, single-threaded, collections. We stop early when enough
@@ -386,6 +397,15 @@ public class VideoPlayerModel {
     private void displayDueFrame(long now) {
         DecodedItem.Video next = readyFrames.peek();
         if (next == null) {
+            if (playbackDiagnostics != null && !pauseRequested && clock.isAnchored()) {
+                long lastTimestampUs = playbackDiagnostics.lastShownTimestampUs();
+                if (lastTimestampUs >= 0 && videoFrameDurationUs > 0) {
+                    long estimatedNextDueNs = clock.targetTimeNs(lastTimestampUs + videoFrameDurationUs);
+                    if (now - estimatedNextDueNs > videoFrameDurationUs * 500L) {
+                        playbackDiagnostics.starved(decoder);
+                    }
+                }
+            }
             return;
         }
         if (pauseRequested && framesAllowedWhilePaused == 0) {
@@ -432,6 +452,7 @@ public class VideoPlayerModel {
 
         // The conversion to a JavaFX Image stays here on the JavaFX thread. That keeps the converter on a single thread
         // and means each Image is made only when it is about to be shown.
+        long convertStartNs = playbackDiagnostics != null ? System.nanoTime() : 0;
         Image image;
         try {
             image = converter.convert(video.frame());
@@ -446,7 +467,13 @@ public class VideoPlayerModel {
             // (a torn picture) or from freed memory. The fence keeps the frame alive until the conversion has finished.
             Reference.reachabilityFence(video);
         }
+        long convertedNs = playbackDiagnostics != null ? System.nanoTime() : 0;
         notifyFrameReady(image);
+        if (playbackDiagnostics != null) {
+            playbackDiagnostics.shown(video.frameNumber(), video.timestampUs(), video.preparedAtNs(),
+                    targetTimeNs, System.nanoTime(), convertedNs - convertStartNs,
+                    System.nanoTime() - convertedNs, videoFrameDurationUs);
+        }
         giveBackFramesFinishedWith(video.frame());
     }
 
@@ -534,6 +561,9 @@ public class VideoPlayerModel {
     }
 
     private void closePlaybackResources() {
+        if (playbackDiagnostics != null) {
+            playbackDiagnostics.reportFinal(readyFrames.size(), decoder);
+        }
         playbackTimer.stop();
         playbackOpen = false;
         stopDecoder();
