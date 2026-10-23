@@ -10,7 +10,13 @@
  */
 package comp3011;
 
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.LongAdder;
 
 import org.bytedeco.javacv.Frame;
 
@@ -56,9 +62,33 @@ final class EffectChain implements FrameEffectsStage {
     private final Object initialiseLock = new Object();
     private volatile boolean initialised; // Written only under the lock. volatile so that other threads see it, and everything the initialisation did, once it is true.
 
+    // Optional diagnostics. Disabled by default, including on TITAN: enable locally with the
+    // COMP3011_PROFILE_EFFECTS=1 environment variable. Each EffectChain owns its own counters.
+    // LongAdders collect timings without forcing worker threads through one shared lock.
+    private static final int PROFILE_REPORT_EVERY_FRAMES = 120;
+    private final LongAdder[] effectTimeNs;
+    private final LongAdder[] effectCalls;
+    private final AtomicInteger profiledFrames;
+    private final Object profileReportLock = new Object();
+    private int lastReportedFrames;
+
     EffectChain(List<FrameProcessor> processors, MediaProperties media) {
         this.processors = List.copyOf(processors);
         this.media = media;
+        boolean profiling = "1".equals(System.getenv("COMP3011_PROFILE_EFFECTS"));
+        if (profiling) {
+            effectTimeNs = new LongAdder[processors.size()];
+            effectCalls = new LongAdder[processors.size()];
+            for (int i = 0; i < processors.size(); i++) {
+                effectTimeNs[i] = new LongAdder();
+                effectCalls[i] = new LongAdder();
+            }
+            profiledFrames = new AtomicInteger();
+        } else {
+            effectTimeNs = null;
+            effectCalls = null;
+            profiledFrames = null;
+        }
     }
 
     @Override
@@ -72,8 +102,67 @@ final class EffectChain implements FrameEffectsStage {
             }
         }
 
-        for (FrameProcessor processor : processors) {
-            processor.process(frame, info);
+        // Keep the ordinary playback hot path free of clocks and atomic updates.
+        if (effectTimeNs == null) {
+            for (FrameProcessor processor : processors) {
+                processor.process(frame, info);
+            }
+            return;
+        }
+
+        for (int i = 0; i < processors.size(); i++) {
+            long startNs = System.nanoTime();
+            try {
+                processors.get(i).process(frame, info);
+            } finally {
+                effectTimeNs[i].add(System.nanoTime() - startNs);
+                effectCalls[i].increment();
+            }
+        }
+        int completed = profiledFrames.incrementAndGet();
+        if (completed % PROFILE_REPORT_EVERY_FRAMES == 0) {
+            reportEffectTimings(completed);
+        }
+    }
+
+    // Totals are accumulated durations over all worker threads, not single-thread CPU usage.
+    // Grouping repeated instances by effect type makes the most expensive effects easy to spot.
+    private void reportEffectTimings(int completedFrames) {
+        // Only profiling workers enter here, and only once per reporting interval. The
+        // lock prevents two snapshots being printed out of order or interleaved.
+        synchronized (profileReportLock) {
+            if (completedFrames <= lastReportedFrames) {
+                return;
+            }
+            lastReportedFrames = completedFrames;
+            writeEffectTimings(completedFrames);
+        }
+    }
+
+    private void writeEffectTimings(int completedFrames) {
+        record Summary(String name, long timeNs, long calls) {
+        }
+        Map<String, long[]> totals = new HashMap<>();
+        for (int i = 0; i < processors.size(); i++) {
+            Class<?> type = processors.get(i).getClass();
+            String name = type.getSimpleName().isEmpty() ? type.getName() : type.getSimpleName();
+            long[] total = totals.computeIfAbsent(name, ignored -> new long[2]);
+            total[0] += effectTimeNs[i].sum();
+            total[1] += effectCalls[i].sum();
+        }
+        List<Summary> ranking = new ArrayList<>();
+        for (Map.Entry<String, long[]> entry : totals.entrySet()) {
+            ranking.add(new Summary(entry.getKey(), entry.getValue()[0], entry.getValue()[1]));
+        }
+        ranking.sort(Comparator.comparingLong(Summary::timeNs).reversed());
+        long allNs = ranking.stream().mapToLong(Summary::timeNs).sum();
+        System.err.printf("EFFECT PROFILE after %d frames (cumulative; elapsed processing time across workers):%n",
+                completedFrames);
+        for (Summary summary : ranking) {
+            double share = allNs == 0 ? 0 : 100.0 * summary.timeNs() / allNs;
+            double averageMs = summary.calls() == 0 ? 0 : summary.timeNs() / 1_000_000.0 / summary.calls();
+            System.err.printf("  %-26s %5.1f%%   %7.3f ms/call   %d calls%n",
+                    summary.name(), share, averageMs, summary.calls());
         }
     }
 
