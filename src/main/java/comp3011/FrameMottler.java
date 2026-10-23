@@ -23,7 +23,7 @@ import org.bytedeco.javacv.Frame;
  * <p>
  * Initialisation builds multi-scale noise fields and colour lookup tables.
  * {@link #process(Frame, InfoFrame)} samples those fields in image blocks and
- * applies the selected channel scales in four-row pixel bands.
+ * applies the selected channel scales through {@link #applyMottleBlock(ByteBuffer, int, int, int, int, int, int)}.
  * </p>
  */
 public class FrameMottler extends FrameProcessor {
@@ -292,14 +292,9 @@ public class FrameMottler extends FrameProcessor {
         // that frames being mottled on different threads cannot overwrite each other's values.
         int[] blockScaleIndices = new int[3];
 
-        // One 4-row band is copied to a Java array only if at least one block is affected.
-        // Processing pixels in the array avoids millions of native-buffer accesses per frame.
-        byte[] band = new byte[Math.min(EFFECT_BLOCK_SIZE, height) * stride];
         for (int blockY = 0; blockY < height; blockY += EFFECT_BLOCK_SIZE) {
             int blockYEnd = Math.min(blockY + EFFECT_BLOCK_SIZE, height);
             int sampleY = (blockY + blockYEnd - 1) / 2;
-            int bytesInBand = (blockYEnd - blockY - 1) * stride + width * channels;
-            boolean bandChanged = false;
 
             for (int blockX = 0; blockX < width; blockX += EFFECT_BLOCK_SIZE) {
                 int blockXEnd = Math.min(blockX + EFFECT_BLOCK_SIZE, width);
@@ -316,23 +311,15 @@ public class FrameMottler extends FrameProcessor {
                     continue;
                 }
 
-                if (!bandChanged) {
-                    pixels.get(blockY * stride, band, 0, bytesInBand);
-                    bandChanged = true;
-                }
                 applyMottleBlock(
-                        band,
+                        pixels,
                         blockX,
                         blockXEnd,
                         blockY,
                         blockYEnd,
-                        blockY,
                         channels,
                         stride,
                         blockScaleIndices);
-            }
-            if (bandChanged) {
-                pixels.put(blockY * stride, band, 0, bytesInBand);
             }
         }
     }
@@ -404,12 +391,11 @@ public class FrameMottler extends FrameProcessor {
     }
 
     private void applyMottleBlock(
-            byte[] band,
+            ByteBuffer pixels,
             int blockX,
             int blockXEnd,
             int blockY,
             int blockYEnd,
-            int bandStartY,
             int channels,
             int stride,
             int[] blockScaleIndices) {
@@ -418,14 +404,14 @@ public class FrameMottler extends FrameProcessor {
         byte[] redLookup = scaleLookups[blockScaleIndices[2]];
 
         for (int y = blockY; y < blockYEnd; y++) {
-            int rowStart = (y - bandStartY) * stride;
+            int rowStart = y * stride;
             for (int x = blockX; x < blockXEnd; x++) {
                 int base = rowStart + x * channels;
 
                 // JavaCV supplies these decoded frames in BGR byte order.
-                band[base] = blueLookup[Byte.toUnsignedInt(band[base])];
-                band[base + 1] = greenLookup[Byte.toUnsignedInt(band[base + 1])];
-                band[base + 2] = redLookup[Byte.toUnsignedInt(band[base + 2])];
+                pixels.put(base, blueLookup[Byte.toUnsignedInt(pixels.get(base))]);
+                pixels.put(base + 1, greenLookup[Byte.toUnsignedInt(pixels.get(base + 1))]);
+                pixels.put(base + 2, redLookup[Byte.toUnsignedInt(pixels.get(base + 2))]);
             }
         }
     }
