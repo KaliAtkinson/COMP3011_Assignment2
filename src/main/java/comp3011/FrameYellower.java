@@ -4,7 +4,7 @@
  * 
  * Authors:
  *   1. Simon Ratcliffe, in collaboration with GPT-5.6 Terra
- *   2. <student name and student number insert here upon modification>
+ *   2. Kali Atkinson 2948529
  *
  * Copyright 2026 Simon Ratcliffe
  */
@@ -112,6 +112,12 @@ public class FrameYellower extends FrameProcessor {
                 clamp(green, 0.0, 255.0),
                 clamp(blue, 0.0, 255.0));
     }
+
+    // The fused pipeline uses the same lookup tables after initialisation.
+    // Keeping these operations here prevents a second implementation of the colour transform.
+    byte blueValue(int value) { return blueLookup[value]; }
+    byte greenValue(int value) { return greenLookup[value]; }
+    byte redValue(int value) { return redLookup[value]; }
 
     private void yellowFrame(ByteBuffer pixels) {
         int height = videoInfo.imageHeight();

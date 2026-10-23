@@ -59,6 +59,7 @@ final class EffectChain implements FrameEffectsStage {
 
     private final List<FrameProcessor> processors;
     private final MediaProperties media;
+    private final List<FrameEffectsStage> fastStages;
     private final Object initialiseLock = new Object();
     private volatile boolean initialised; // Written only under the lock. volatile so that other threads see it, and everything the initialisation did, once it is true.
 
@@ -75,6 +76,9 @@ final class EffectChain implements FrameEffectsStage {
     EffectChain(List<FrameProcessor> processors, MediaProperties media) {
         this.processors = List.copyOf(processors);
         this.media = media;
+        fastStages = "1".equals(System.getenv("COMP3011_DISABLE_COLOUR_FUSION"))
+                ? originalStages(this.processors)
+                : buildFastStages(this.processors);
         boolean profiling = "1".equals(System.getenv("COMP3011_PROFILE_EFFECTS"));
         if (profiling) {
             effectTimeNs = new LongAdder[processors.size()];
@@ -104,8 +108,8 @@ final class EffectChain implements FrameEffectsStage {
 
         // Keep the ordinary playback hot path free of clocks and atomic updates.
         if (effectTimeNs == null) {
-            for (FrameProcessor processor : processors) {
-                processor.process(frame, info);
+            for (FrameEffectsStage stage : fastStages) {
+                stage.apply(frame, info);
             }
             return;
         }
@@ -123,6 +127,32 @@ final class EffectChain implements FrameEffectsStage {
         if (completed % PROFILE_REPORT_EVERY_FRAMES == 0) {
             reportEffectTimings(completed);
         }
+    }
+
+    private static List<FrameEffectsStage> originalStages(List<FrameProcessor> processors) {
+        List<FrameEffectsStage> stages = new ArrayList<>();
+        for (FrameProcessor processor : processors) {
+            stages.add(processor::process);
+        }
+        return List.copyOf(stages);
+    }
+
+    // Fuse only the two exact three-stage orders used in the heavy TITAN workload.
+    // Other processors (and subclasses) retain the original path without any change.
+    // Keep the original individual calls while profiling for comparable timings.
+    private static List<FrameEffectsStage> buildFastStages(List<FrameProcessor> processors) {
+        List<FrameEffectsStage> result = new ArrayList<>();
+        for (int i = 0; i < processors.size();) {
+            if (i + 2 < processors.size()
+                    && FusedColourRun.supports(processors.get(i), processors.get(i + 1), processors.get(i + 2))) {
+                result.add(new FusedColourRun(processors.subList(i, i + 3)));
+                i += 3;
+            } else {
+                FrameProcessor processor = processors.get(i++);
+                result.add(processor::process);
+            }
+        }
+        return List.copyOf(result);
     }
 
     // Totals are accumulated durations over all worker threads, not single-thread CPU usage.

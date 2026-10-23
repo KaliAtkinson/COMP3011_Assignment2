@@ -4,7 +4,7 @@
  * 
  * Authors:
  *   1. Simon Ratcliffe, in collaboration with GPT-5.6 Terra
- *   2. <student name and student number insert here upon modification>
+ *   2. Kali Atkinson 2948529
  *
  * Copyright 2026 Simon Ratcliffe
  */
@@ -113,6 +113,12 @@ public class FrameVignetter extends FrameProcessor {
         }
 
         return envelope;
+    }
+
+    // Apply the original horizontal lookup followed by the vertical lookup, including
+    // their intermediate rounding, so the fused path is bit-for-bit equivalent.
+    byte vignetteValue(int x, int y, int value) {
+        return yLookups[y][Byte.toUnsignedInt(xLookups[x][value])];
     }
 
     private void vignetteFrame(ByteBuffer pixels) {
