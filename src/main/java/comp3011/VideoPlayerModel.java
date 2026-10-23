@@ -55,7 +55,7 @@ public class VideoPlayerModel {
     private static final long FIVE_SECONDS_US = 5_000_000L;
     private static final long AUDIO_LEAD_NS = 30_000_000L;
     // One worker for each core, since applying the effects is what takes the time and it spreads across all of them.
-    private static final int DECODER_WORKER_THREADS = Math.max(1, Runtime.getRuntime().availableProcessors());
+    private static final int DECODER_WORKER_THREADS = Math.max(1, Runtime.getRuntime().availableProcessors() - 1);
     // Decoded items (video and audio) the decoder may run ahead. That is also the most frames that can be in the effects
     // at once, so it must comfortably exceed the number of workers or some would have nothing to do. Every frame in here
     // is a full copy of a decoded picture, so it is kept no larger than that needs.
@@ -456,7 +456,7 @@ public class VideoPlayerModel {
     private void giveBackFramesFinishedWith(Frame shown) {
         recentlyShown.addLast(shown);
         while (recentlyShown.size() > FRAMES_KEPT_AFTER_SHOWING) {
-            // No frame pool exists yet; releasing the deque reference permits normal GC.
+            recentlyShown.removeFirst();
         }
     }
 
