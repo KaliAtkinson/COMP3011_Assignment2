@@ -144,7 +144,8 @@ final class FrameDecoder {
         thread.setDaemon(true); // A forgotten decoder must never keep the application alive.
     }
 
-    /** Makes the worker threads daemons, so that forgotten workers can never keep the application alive, and names them. */
+    /** Names effect workers and runs them at minimum priority so JavaFX rendering can be scheduled promptly.
+     * Credit to Ethan Dankiw and Scott Macdonald for the advice and Vernon Lal for sharing the same similar problem as me */
     private static final class WorkerThreadFactory implements ThreadFactory {
         private final AtomicInteger count = new AtomicInteger();
 
@@ -152,6 +153,8 @@ final class FrameDecoder {
         public Thread newThread(Runnable task) {
             Thread worker = new Thread(task, "frame-worker-" + count.incrementAndGet());
             worker.setDaemon(true);
+            // Effects are CPU-intensive; leave scheduling preference to JavaFX and the decoder.
+            worker.setPriority(Thread.MIN_PRIORITY);
             return worker;
         }
     }

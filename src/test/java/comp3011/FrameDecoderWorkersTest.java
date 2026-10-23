@@ -154,6 +154,22 @@ class FrameDecoderWorkersTest {
     }
 
     @Test
+    void effectWorkersHaveMinimumPriority() throws Exception {
+        AtomicInteger processed = new AtomicInteger();
+        AtomicInteger wrongPriority = new AtomicInteger();
+        start(new NumberedSource(24, false), (frame, info) -> {
+            processed.incrementAndGet();
+            if (Thread.currentThread().getPriority() != Thread.MIN_PRIORITY) {
+                wrongPriority.incrementAndGet();
+            }
+        }, 12, 3);
+
+        collectUntilTerminal(0);
+        assertEquals(24, processed.get());
+        assertEquals(0, wrongPriority.get(), "Effect work should run at minimum thread priority");
+    }
+
+    @Test
     void framesComeOutInDecodeOrderEvenWhenWorkersFinishOutOfOrder() throws Exception {
         // Every fourth frame is slow, so frames after it are finished first and have to wait their turn.
         start(new NumberedSource(60, false), (frame, info) -> sleep(info.frameNumber() % 4 == 0 ? 40 : 1), 16, 4);
