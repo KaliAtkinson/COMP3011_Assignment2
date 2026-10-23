@@ -34,6 +34,30 @@ public class FrameBleeder extends FrameProcessor {
     private static final double GREEN_BLEED_STRENGTH = 62.0;
     private static final double BLUE_BLEED_STRENGTH = 18.0;
 
+    // Per-worker scratch storage avoids repeated HD-frame allocations without sharing
+    // mutable arrays between frames being processed concurrently.
+    private final ThreadLocal<Scratch> scratch = ThreadLocal.withInitial(Scratch::new);
+
+    private static final class Scratch {
+        double[] brightMask = new double[0];
+        double[] horizontalBlurMask = new double[0];
+        double[] blurredMask = new double[0];
+        byte[] blockRows = new byte[0];
+        byte[] pixelRow = new byte[0];
+        boolean[] cellCanGlow = new boolean[0];
+
+        void ensureCapacity(int maskPixels, int blockBytes, int rowBytes, int maskColumns) {
+            if (brightMask.length < maskPixels) {
+                brightMask = new double[maskPixels];
+                horizontalBlurMask = new double[maskPixels];
+                blurredMask = new double[maskPixels];
+            }
+            if (blockRows.length < blockBytes) blockRows = new byte[blockBytes];
+            if (pixelRow.length < rowBytes) pixelRow = new byte[rowBytes];
+            if (cellCanGlow.length < maskColumns) cellCanGlow = new boolean[maskColumns];
+        }
+    }
+
     private int maskWidth;
     private int maskHeight;
     private int[] xMaskLeft;
@@ -72,16 +96,14 @@ public class FrameBleeder extends FrameProcessor {
             throw new Exception("FrameBleeder requires at least three image channels");
         }
 
-        // These masks are scratch space for this one frame. They are local variables, not fields, so that frames
-        // processed on different threads at the same time can never overwrite each other's masks.
-        double[] brightMask = new double[maskWidth * maskHeight];
-        double[] horizontalBlurMask = new double[brightMask.length];
-        double[] blurredMask = new double[brightMask.length];
+        Scratch work = scratch.get();
+        work.ensureCapacity(maskWidth * maskHeight, MASK_BLOCK_SIZE * videoInfo.imageStride(),
+                videoInfo.imageWidth() * videoInfo.imageChannels(), maskWidth);
 
-        buildBrightMask(pixels, brightMask);
-        blurHorizontally(brightMask, horizontalBlurMask);
-        blurVertically(horizontalBlurMask, blurredMask);
-        applyBleed(pixels, blurredMask);
+        buildBrightMask(pixels, work.brightMask, work.blockRows);
+        blurHorizontally(work.brightMask, work.horizontalBlurMask);
+        blurVertically(work.horizontalBlurMask, work.blurredMask);
+        applyBleed(pixels, work.blurredMask, work.pixelRow, work.cellCanGlow);
     }
 
     private void buildSamplingLookups() {
@@ -141,12 +163,11 @@ public class FrameBleeder extends FrameProcessor {
 
     // Finds the brightest pixel in each block. The frame is read a whole row of blocks at a time into an array, which is
     // far faster than reading it a byte at a time from the buffer, and gives exactly the same answers.
-    private void buildBrightMask(ByteBuffer pixels, double[] brightMask) {
+    private void buildBrightMask(ByteBuffer pixels, double[] brightMask, byte[] rows) {
         int width = videoInfo.imageWidth();
         int height = videoInfo.imageHeight();
         int channels = videoInfo.imageChannels();
         int stride = videoInfo.imageStride();
-        byte[] rows = new byte[MASK_BLOCK_SIZE * stride];
 
         for (int maskY = 0; maskY < maskHeight; maskY++) {
             int blockY = maskY * MASK_BLOCK_SIZE;
@@ -228,14 +249,12 @@ public class FrameBleeder extends FrameProcessor {
     // four mask values it is blended from is above zero, so whole cells and rows that cannot glow are skipped without
     // working anything out. Where there is a glow, the arithmetic is exactly as before. Each row is read and written back
     // in one go instead of a byte at a time.
-    private void applyBleed(ByteBuffer pixels, double[] blurredMask) {
+    private void applyBleed(ByteBuffer pixels, double[] blurredMask, byte[] row, boolean[] cellCanGlow) {
         int width = videoInfo.imageWidth();
         int height = videoInfo.imageHeight();
         int channels = videoInfo.imageChannels();
         int stride = videoInfo.imageStride();
         int rowBytes = width * channels;
-        byte[] row = new byte[rowBytes];
-        boolean[] cellCanGlow = new boolean[maskWidth];
         boolean rowCanGlow = false;
         int cellsWorkedOutFor = -1;
 
