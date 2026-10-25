@@ -54,7 +54,7 @@ public class VideoPlayerModel {
     private static final long NO_SEEK_REQUEST = -1; // Sentinel value used when no seek position is active.
     private static final long FIVE_SECONDS_US = 5_000_000L;
     private static final long AUDIO_LEAD_NS = 30_000_000L;
-    // One worker for each core, since applying the effects is what takes the time and it spreads across all of them.
+    // Leave one logical processor available for JavaFX and decoding; workers are also lower-priority.
     private static final int DECODER_WORKER_THREADS = Math.max(1, Runtime.getRuntime().availableProcessors() - 1);
     // Decoded items (video and audio) the decoder may run ahead. That is also the most frames that can be in the effects
     // at once, so it must comfortably exceed the number of workers or some would have nothing to do. Every frame in here

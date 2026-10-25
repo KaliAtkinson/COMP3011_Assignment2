@@ -29,7 +29,7 @@ import org.bytedeco.javacv.Frame;
 
 /**
  * Decodes media on a thread of its own, and applies the effects to the decoded frames on a pool of worker threads, so
- * that neither competes with the JavaFX thread for time and the effects can use every core of the machine.
+ * so heavy effect processing need not run on the JavaFX event thread.
  *
  * <p>
  * <b>Threading design.</b> There are three kinds of thread. The <i>decoder thread</i> is the only thread that ever
@@ -144,8 +144,7 @@ final class FrameDecoder {
         thread.setDaemon(true); // A forgotten decoder must never keep the application alive.
     }
 
-    /** Names effect workers and runs them at minimum priority so JavaFX rendering can be scheduled promptly.
-     * Credit to Ethan Dankiw and Scott Macdonald for the advice and Vernon Lal for sharing the same similar problem as me */
+    /** Names effect workers and runs them at minimum priority so JavaFX rendering can be scheduled promptly. */
     private static final class WorkerThreadFactory implements ThreadFactory {
         private final AtomicInteger count = new AtomicInteger();
 
@@ -279,8 +278,8 @@ final class FrameDecoder {
         }
     }
 
-    // Cancels the work that has not started, then waits for the work that has. Only when this returns is it certain that
-    // no worker is still applying effects to a frame.
+    // Requests cancellation, then waits up to the configured timeout for workers to stop. If a worker ignores
+    // interruption, the timeout is reported; completion is not guaranteed in that failure case.
     private void stopWorkers() {
         workers.shutdownNow();
         try {
