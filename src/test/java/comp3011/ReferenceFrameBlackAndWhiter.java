@@ -8,6 +8,13 @@
  *
  * Copyright 2026 Simon Ratcliffe
  */
+/*
+ * AI Assistance:
+ * This test suite was developed and refined with advice, guidance,
+ * and code assistance from OpenAI ChatGPT.
+ * Test implementations were reviewed and validated as part of
+ * the development process.
+ */
 package comp3011;
 
 // A copy of the original, unoptimised effect exactly as supplied. It exists only so that tests can prove the faster

@@ -1,3 +1,20 @@
+/*
+ * Starter code supplied for Adelaide University COMP3011 Assignment 2.
+ * Students are free to modify this file for assessment purposes.
+ *
+ * Authors:
+ *   1. Simon Ratcliffe, in collaboration with GPT-5.6 Terra
+ *   2. Kali Atkinson 2948529
+ *
+ * Copyright 2026 Simon Ratcliffe
+ */
+/*
+ * AI Assistance:
+ * This test suite was developed and refined with advice, guidance,
+ * and code assistance from OpenAI ChatGPT.
+ * Test implementations were reviewed and validated as part of
+ * the development process.
+ */
 package comp3011;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;

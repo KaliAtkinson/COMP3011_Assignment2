@@ -6,6 +6,13 @@
  * This test deliberately makes no absolute FPS or relative speed assertion:
  * CPU scheduling and CI machine load vary, but byte-identical output must not.
  */
+/*
+ * AI Assistance:
+ * This test suite was developed and refined with advice, guidance,
+ * and code assistance from OpenAI ChatGPT.
+ * Test implementations were reviewed and validated as part of
+ * the development process.
+ */
 package comp3011;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
