@@ -1,4 +1,3 @@
-
 /*
  * Starter code supplied for Adelaide University COMP3011 Assignment 2.
  * Students are free to modify this file for assessment purposes.

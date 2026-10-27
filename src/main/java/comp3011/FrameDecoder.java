@@ -68,9 +68,10 @@ import org.bytedeco.javacv.Frame;
  * </p>
  *
  * <p>
- * <b>Stopping.</b> When the decoder thread ends, it first stops the workers and waits for all of them to finish, and
- * only then closes the source. Anyone who waits for the decoder thread to end can therefore be sure that nothing is
- * still using the effects.
+ * <b>Stopping.</b> The decoder requests worker cancellation and waits for their termination before closing the source.
+ * The wait is bounded to avoid an indefinite shutdown if an effect or a native operation ignores interruption.
+ * In the normal case, workers terminate before the decoder thread ends; if the bound expires, a warning is emitted.
+ * Therefore decoder termination alone does <b>not</b> guarantee that a non-cooperative worker has stopped.
  * </p>
  */
 final class FrameDecoder {
@@ -287,7 +288,7 @@ final class FrameDecoder {
         }
     }
 
-    // Cancel pending effect work and wait for active workers before the decoder thread exits.
+    // Cancel pending effect work and wait for active workers, with a bounded timeout.
     // shutdown() deliberately interrupts the decoder to wake it from queue waits. That interrupt flag
     // must not cause awaitTermination() to return immediately while workers still own frames/effects.
     // Retain the interrupt status, wait up to the bound, then restore it for callers observing the thread.

@@ -1,12 +1,6 @@
 /*
- * Starter code supplied for Adelaide University COMP3011 Assignment 2.
- * Students are free to modify this file for assessment purposes.
- *
- * Authors:
- *   1. Simon Ratcliffe, in collaboration with GPT-5.6 Terra
- *   2. Kali Atkinson 2948529
- *
- * Copyright 2026 Simon Ratcliffe
+ * COMP3011 Assignment 2: regression tests for command-line parsing.
+ * Project author: Kali Atkinson. Starter player originally supplied by Simon Ratcliffe.
  */
 /*
  * AI Assistance:

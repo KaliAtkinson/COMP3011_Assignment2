@@ -1,5 +1,6 @@
 /*
- * Playback instrumentation for Adelaide University COMP3011 Assignment 2.
+ * Playback instrumentation added for Adelaide University COMP3011 Assignment 2.
+ * Project author: Kali Atkinson. Starter player originally supplied by Simon Ratcliffe.
  * Opt-in only; uses no background thread and never changes the playback clock or frame queues.
  * All methods are called by the JavaFX application thread.
  */

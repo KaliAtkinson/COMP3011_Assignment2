@@ -17,6 +17,7 @@ package comp3011;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
@@ -32,13 +33,13 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
 /**
- * A repeatable end-to-end decoder/effects throughput comparison, run by {@code mvn verify}.
+ * A repeatable cooperative-versus-parallel effects throughput comparison, run by {@code mvn verify}.
  *
- * <p>Both cases run the <b>same FrameDecoder architecture</b> with one worker versus
- * four workers, using an identical synthetic 24-FPS sequence and six real effects.
- * The one-worker run is a sequential-effects baseline; it is <b>not</b> a launch
- * or timing of the separately supplied original single-threaded JavaFX player.
- * The latter needs a real video, the original project, and screen capture.</p>
+ * <p>The cooperative case grabs and processes every frame on the calling thread,
+ * using the same input and effect chain as the concurrent decoder. The other two
+ * cases run a {@link FrameDecoder} with one worker and with four workers.
+ * None of these cases launch the supplied original single-threaded JavaFX player;
+ * the full original-player GUI comparison requires the starter project and a graphical benchmark.</p>
  *
  * <p>The frames must be bit-for-bit identical and in decode order. Timings are
  * printed for manual comparison, without flaky CI performance thresholds.</p>
@@ -113,6 +114,30 @@ class FramePipelineLoadComparisonTest {
         return pixels;
     }
 
+    /** Sequential cooperative baseline: grab and apply all effects on one thread, as in the starter's model. */
+    private static Measurement runCooperatively() throws Exception {
+        SyntheticVideoSource source = new SyntheticVideoSource();
+        EffectChain chain = effects();
+        List<byte[]> collected = new ArrayList<>();
+        long start = System.nanoTime();
+        try {
+            Frame frame;
+            while ((frame = source.grab()) != null) {
+                int number = source.frameNumber();
+                long timestampUs = source.timestampUs();
+                assertEquals(collected.size(), number, "cooperative baseline must retain decode order");
+                assertEquals(number * FRAME_DURATION_US, timestampUs);
+                // No worker or frame clone is necessary; this thread finishes before grabbing again.
+                chain.apply(frame, new InfoFrame(number, timestampUs));
+                collected.add(snapshot(frame));
+            }
+            assertEquals(FRAMES, collected.size());
+            return new Measurement(System.nanoTime() - start, collected);
+        } finally {
+            source.close();
+        }
+    }
+
     private static Measurement run(int workerCount) throws Exception {
         FrameDecoder decoder = new FrameDecoder(new SyntheticVideoSource(), effects(), null, 24, workerCount);
         List<byte[]> collected = new ArrayList<>();
@@ -150,22 +175,28 @@ class FramePipelineLoadComparisonTest {
 
     @Test
     @Timeout(120)
-    void fourWorkersMatchSingleWorkerOutputAndReportThroughput() throws Exception {
+    void cooperativeSingleWorkerAndFourWorkersMatchAndReportThroughput() throws Exception {
+        Measurement cooperative = runCooperatively();
         Measurement single = run(1);
         Measurement parallel = run(4);
 
+        assertEquals(cooperative.frames().size(), single.frames().size());
         assertEquals(single.frames().size(), parallel.frames().size());
         for (int i = 0; i < FRAMES; i++) {
-            assertArrayEquals(single.frames().get(i), parallel.frames().get(i),
-                    "parallel processing changed the pixels in frame " + i);
+            assertArrayEquals(cooperative.frames().get(i), single.frames().get(i),
+                    "one-worker decoder changed the pixels in frame " + i);
+            assertArrayEquals(cooperative.frames().get(i), parallel.frames().get(i),
+                    "parallel decoder changed the pixels in frame " + i);
         }
 
+        double cooperativeSeconds = cooperative.elapsedNs() / 1_000_000_000.0;
         double singleSeconds = single.elapsedNs() / 1_000_000_000.0;
         double parallelSeconds = parallel.elapsedNs() / 1_000_000_000.0;
         System.out.printf("LOAD COMPARISON (%d synthetic %dx%d frames, six ordered colour effects): "
-                        + "1 worker = %.3fs, 4 workers = %.3fs, observed ratio = %.2fx%n",
-                FRAMES, WIDTH, HEIGHT, singleSeconds, parallelSeconds,
-                singleSeconds / parallelSeconds);
+                        + "cooperative = %.3fs, 1 worker = %.3fs, 4 workers = %.3fs, "
+                        + "cooperative/4-worker ratio = %.2fx%n",
+                FRAMES, WIDTH, HEIGHT, cooperativeSeconds, singleSeconds, parallelSeconds,
+                cooperativeSeconds / parallelSeconds);
         // Correctness is asserted; speed is observational because the CI environment is shared.
     }
 }
