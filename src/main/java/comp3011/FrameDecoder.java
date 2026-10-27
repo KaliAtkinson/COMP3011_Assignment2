@@ -232,9 +232,14 @@ final class FrameDecoder {
         return new QueueProbe(output.size(), head != null && !head.future().isDone());
     }
 
-    /** Asks the decoder to stop and close its source. Returns immediately; see {@link #awaitTermination(long)}. */
+    /**
+     * Requests termination and wakes the decoder if it is waiting for a seek or output-queue space.
+     * The interrupt is a wake-up, not permission for another thread to close the media source;
+     * the decoder still closes its own source after stopping its workers.
+     */
     void shutdown() {
         stopRequested = true;
+        thread.interrupt();
     }
 
     /** Waits up to the given time for the decoder thread to finish. Returns true if it has. */
@@ -282,16 +287,33 @@ final class FrameDecoder {
         }
     }
 
-    // Requests cancellation, then waits up to the configured timeout for workers to stop. If a worker ignores
-    // interruption, the timeout is reported; completion is not guaranteed in that failure case.
+    // Cancel pending effect work and wait for active workers before the decoder thread exits.
+    // shutdown() deliberately interrupts the decoder to wake it from queue waits. That interrupt flag
+    // must not cause awaitTermination() to return immediately while workers still own frames/effects.
+    // Retain the interrupt status, wait up to the bound, then restore it for callers observing the thread.
     private void stopWorkers() {
         workers.shutdownNow();
+        boolean interrupted = Thread.interrupted(); // Save and clear the decoder's wake-up interrupt.
         try {
-            if (!workers.awaitTermination(WORKER_STOP_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
-                System.err.println("WARNING: frame workers did not stop within " + WORKER_STOP_TIMEOUT_SECONDS + "s");
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(WORKER_STOP_TIMEOUT_SECONDS);
+            while (!workers.isTerminated()) {
+                long remainingNs = deadline - System.nanoTime();
+                if (remainingNs <= 0) {
+                    System.err.println("WARNING: frame workers did not stop within "
+                            + WORKER_STOP_TIMEOUT_SECONDS + "s");
+                    break;
+                }
+                try {
+                    workers.awaitTermination(remainingNs, TimeUnit.NANOSECONDS);
+                } catch (InterruptedException e) {
+                    // Preserve the request, but finish the bounded cleanup wait rather than abandoning workers.
+                    interrupted = true;
+                }
             }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
+        } finally {
+            if (interrupted) {
+                Thread.currentThread().interrupt();
+            }
         }
     }
 

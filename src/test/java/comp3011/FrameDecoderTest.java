@@ -164,6 +164,23 @@ class FrameDecoderTest {
     }
 
     @Test
+    void shutdownWakesIdleDecoderWithoutWaitingForLongPollInterval() throws Exception {
+        // After end-of-stream, the decoder waits for a new seek. Stopping the player should wake it
+        // promptly rather than forcing JavaFX to wait for the next long idle poll.
+        FakeMediaSource source = new FakeMediaSource(0, false);
+        decoder = new FrameDecoder(source, NO_EFFECTS, null, 4, 1, 10_000);
+        decoder.start();
+        assertInstanceOf(DecodedItem.EndOfStream.class,
+                awaitItem(0, item -> item instanceof DecodedItem.EndOfStream));
+
+        // Allow the decoder to enter its idle wait after publishing end-of-stream.
+        Thread.sleep(100);
+        decoder.shutdown();
+        assertTrue(decoder.awaitTermination(1_500), "shutdown waited for the 10-second idle polling interval");
+        assertEquals(1, source.closeCount.get(), "decoder must close its source exactly once");
+    }
+
+    @Test
     void deliversEveryFrameInOrderThenEndOfStream() throws Exception {
         startDecoder(20, 64);
 

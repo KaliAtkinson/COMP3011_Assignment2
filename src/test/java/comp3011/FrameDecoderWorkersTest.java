@@ -11,6 +11,7 @@
 package comp3011;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
@@ -376,6 +377,41 @@ class FrameDecoderWorkersTest {
         assertTrue(decoder.awaitTermination(WAIT_MS), "decoder thread did not stop");
         // This is what lets the player safely reuse the effect processors after waiting for the decoder.
         assertEquals(0, running.get(), "a worker was still applying effects after the decoder thread ended");
+    }
+
+    @Test
+    void shutdownWaitsForInterruptedWorkersToFinishTheirCleanup() throws Exception {
+        // A shutdown interrupt must wake the decoder, not make it abandon the worker termination wait.
+        // Hold two workers in interrupt-triggered cleanup so this race is reproducible.
+        CountDownLatch started = new CountDownLatch(2);
+        CountDownLatch allowCleanup = new CountDownLatch(1);
+        AtomicInteger running = new AtomicInteger();
+        try {
+            start(new NumberedSource(1_000, false), (frame, info) -> {
+                running.incrementAndGet();
+                started.countDown();
+                try {
+                    try {
+                        Thread.sleep(30_000);
+                    } catch (InterruptedException cancelled) {
+                        allowCleanup.await();
+                    }
+                } finally {
+                    running.decrementAndGet();
+                }
+            }, 8, 2);
+            assertTrue(started.await(WAIT_MS, TimeUnit.MILLISECONDS), "workers never started");
+
+            decoder.shutdown();
+            assertFalse(decoder.awaitTermination(100), "decoder ended before worker cleanup finished");
+            assertEquals(2, running.get(), "workers must still be in their cleanup sections");
+
+            allowCleanup.countDown();
+            assertTrue(decoder.awaitTermination(WAIT_MS), "decoder did not finish after cleanup");
+            assertEquals(0, running.get(), "worker effects outlived the decoder");
+        } finally {
+            allowCleanup.countDown(); // Never leave the test's worker threads blocked after failure.
+        }
     }
 
     @Test
