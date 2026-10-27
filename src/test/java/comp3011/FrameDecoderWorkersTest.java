@@ -20,7 +20,12 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Random;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -167,6 +172,69 @@ class FrameDecoderWorkersTest {
         collectUntilTerminal(0);
         assertEquals(24, processed.get());
         assertEquals(0, wrongPriority.get(), "Effect work should run at minimum thread priority");
+    }
+
+    @Test
+    void concurrentSeeksCannotApplyAnOlderGenerationAfterANewerOne() throws Exception {
+        // The GUI normally makes seek requests on one thread, but FrameDecoder.seek() also promises callers that
+        // seek requests from multiple threads are safe. Generation allocation and queue insertion must be ordered
+        // together, otherwise the decoder can be directed backwards by a delayed caller.
+        List<Long> appliedSeeks = Collections.synchronizedList(new ArrayList<>());
+        NumberedSource source = new NumberedSource(200_000, false) {
+            @Override
+            public void seek(long timestampUs) {
+                super.seek(timestampUs);
+                appliedSeeks.add(timestampUs); // Executed by the decoder thread, not the seeking callers.
+            }
+        };
+        start(source, (frame, info) -> { }, 8, 3);
+
+        final int callers = 6;
+        final int requestsPerCaller = 24;
+        CountDownLatch startTogether = new CountDownLatch(1);
+        Map<Long, Integer> requestedGenerations = new ConcurrentHashMap<>();
+        ExecutorService seekingThreads = Executors.newFixedThreadPool(callers);
+        try {
+            List<Future<?>> tasks = new ArrayList<>();
+            for (int caller = 0; caller < callers; caller++) {
+                final int callerId = caller;
+                tasks.add(seekingThreads.submit(() -> {
+                    startTogether.await();
+                    for (int request = 0; request < requestsPerCaller; request++) {
+                        long targetUs = (2_000L + callerId * requestsPerCaller + request) * FRAME_US;
+                        int generation = decoder.seek(targetUs);
+                        requestedGenerations.put(targetUs, generation);
+                    }
+                    return null;
+                }));
+            }
+            startTogether.countDown();
+            for (Future<?> task : tasks) {
+                task.get(WAIT_MS, TimeUnit.MILLISECONDS);
+            }
+
+            // Force an observable final seek, then check every seek that the decoder actually performed.
+            long finalTargetUs = 190_000L * FRAME_US;
+            int finalGeneration = decoder.seek(finalTargetUs);
+            requestedGenerations.put(finalTargetUs, finalGeneration);
+            assertEquals(190_000, assertInstanceOf(DecodedItem.Video.class,
+                    awaitItem(finalGeneration)).frameNumber());
+
+            int previousGeneration = -1;
+            synchronized (appliedSeeks) {
+                for (long timestampUs : appliedSeeks) {
+                    Integer generation = requestedGenerations.get(timestampUs);
+                    assertTrue(generation != null, "decoder applied an unknown seek " + timestampUs);
+                    assertTrue(generation > previousGeneration,
+                            "decoder applied generation " + generation + " after " + previousGeneration);
+                    previousGeneration = generation;
+                }
+            }
+            assertEquals(finalGeneration, previousGeneration, "latest seek was not applied last");
+        } finally {
+            seekingThreads.shutdownNow();
+            assertTrue(seekingThreads.awaitTermination(WAIT_MS, TimeUnit.MILLISECONDS));
+        }
     }
 
     @Test

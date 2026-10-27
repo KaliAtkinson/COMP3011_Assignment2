@@ -166,8 +166,12 @@ final class FrameDecoder {
     /**
      * Asks the decoder to continue from the given position. Returns the new generation: from now on, only items
      * carrying this generation (or a later one) are worth looking at. Safe to call from any thread, at any time.
+     *
+     * The generation increment and request insertion must be atomic with respect to other callers. Otherwise one
+     * caller could allocate generation 1, pause, and enqueue it after another caller's generation 2. The decoder
+     * would then apply an older seek last, even though the consumer had already switched to generation 2.
      */
-    int seek(long timestampUs) {
+    synchronized int seek(long timestampUs) {
         int generation = latestGeneration.incrementAndGet();
         // Publish the request first, so that a decoder woken by the space freed below already sees it, and then remove
         // only the stale items, which are those from older generations. Items for the new position carry the new

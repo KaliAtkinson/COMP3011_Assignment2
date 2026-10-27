@@ -50,7 +50,7 @@ The queue handoff and `Future` completion establish the necessary cross-thread v
 
 ### Seeking, stopping and limitations
 
-A seek increments the active *generation*. The decoder moves its media source on its own thread; any results from an older generation are ignored by the consumer. The output queue is bounded and `poll()` is non-blocking, so slow workers cannot directly block a JavaFX pulse. A frame finishing after another frame still waits for its decode-order turn; this is intentional correctness over out-of-order playback.
+A seek increments the active *generation*. `FrameDecoder.seek()` serialises generation allocation and request publication, preventing simultaneous callers from publishing a lower generation after a higher one. The decoder moves its media source on its own thread; any results from an older generation are ignored by the consumer. The output queue is bounded and `poll()` is non-blocking, so slow workers cannot directly block a JavaFX pulse. A frame finishing after another frame still waits for its decode-order turn; this is intentional correctness over out-of-order playback.
 
 Shutdown requests decoder termination and worker interruption, and the decoder tries to stop workers before closing the media source. **There is a bounded termination wait**, so if a native operation or effect ignores interruption, a warning can be emitted: this is a limit of the current shutdown design and should not be described as guaranteed prompt termination under every failure. Stalls in the GUI or OS scheduler can still cause frames to be *missed by an external screen capture* even if the internal ordered sequence has no frame gaps.
 
